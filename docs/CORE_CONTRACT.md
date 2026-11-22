@@ -198,3 +198,12 @@ tests/
 ```
 
 This layout is proposed for Task 01. Existing repository content must be preserved; new files are added only after this contract is accepted.
+
+## 10. Planned extensions (not part of Task 01)
+
+The README describes two rules beyond R1–R7. They are planned for later sprints and are intentionally absent from the Task 01 types and acceptance criteria.
+
+- **R8 — Risk budget.** Each `ActionType` has an operator-configured point cost, and each mission has a point budget. When the remaining budget cannot cover a requested action, the decision is `REQUIRE_APPROVAL`. Spent points are tracked per mission with an atomic counter so concurrent requests cannot overspend. Point values are configuration, not a measure of real-world impact.
+- **R9 — Tripwires.** A mission may declare decoy tools and decoy resources that no legitimate task uses. A request that targets a decoy results in `BLOCK`, revokes the agent session and writes an incident record containing the triggering request.
+
+Both rules must remain deterministic, fail closed, and be covered by unit tests before any AWS integration. Neither rule may turn an otherwise blocked request into an allowed one.

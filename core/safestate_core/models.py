@@ -7,11 +7,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from enum import StrEnum
+from enum import Enum
 from typing import TypeAlias
 
 
-class DecisionStatus(StrEnum):
+class DecisionStatus(str, Enum):
     """Outcome returned by the deterministic policy engine."""
 
     ALLOW = "ALLOW"

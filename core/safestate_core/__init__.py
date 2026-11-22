@@ -15,6 +15,7 @@ from .models import (
     ResourceContext,
     ResourceType,
 )
+from .validation import UnknownActionError, ValidationError, parse_request
 
 __all__ = [
     "ActionRequest",
@@ -27,4 +28,7 @@ __all__ = [
     "PolicyEffect",
     "ResourceContext",
     "ResourceType",
+    "UnknownActionError",
+    "ValidationError",
+    "parse_request",
 ]

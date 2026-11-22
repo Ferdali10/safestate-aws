@@ -19,7 +19,7 @@ class DecisionStatus(str, Enum):
     REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
 
 
-class ActionType(StrEnum):
+class ActionType(str, Enum):
     """Allow-listed actions understood by the initial cost-analysis MVP."""
 
     LIST_INSTANCES = "LIST_INSTANCES"
@@ -32,7 +32,7 @@ class ActionType(StrEnum):
     REQUEST_STOP_INSTANCE = "REQUEST_STOP_INSTANCE"
 
 
-class EnvironmentClass(StrEnum):
+class EnvironmentClass(str, Enum):
     """Trusted environment classification; UNKNOWN is never write-eligible."""
 
     PROD = "PROD"
@@ -41,14 +41,14 @@ class EnvironmentClass(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
-class ResourceType(StrEnum):
+class ResourceType(str, Enum):
     EC2_INSTANCE = "EC2_INSTANCE"
     EBS_VOLUME = "EBS_VOLUME"
     S3_BUCKET = "S3_BUCKET"
     COST_REPORT = "COST_REPORT"
 
 
-class ApprovalStatus(StrEnum):
+class ApprovalStatus(str, Enum):
     """Lifecycle states reserved for the approval subsystem."""
 
     PENDING = "PENDING"
@@ -58,7 +58,7 @@ class ApprovalStatus(StrEnum):
     CONSUMED = "CONSUMED"
 
 
-class PolicyEffect(StrEnum):
+class PolicyEffect(str, Enum):
     """Internal policy effects used when rules are evaluated."""
 
     PERMIT_READ = "PERMIT_READ"

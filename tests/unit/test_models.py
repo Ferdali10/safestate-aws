@@ -125,3 +125,64 @@ def test_decision_rejects_naive_evaluation_timestamp():
             evaluated_at=datetime(2026, 11, 22, 12, 0),
             approval_required=False,
         )
+
+
+def make_mission(**overrides):
+    values = {
+        "mission_id": "aws-cost-analysis",
+        "version": "1.0",
+        "agent_id": "cost-analysis-agent",
+        "purpose": "Analyze cloud costs without direct resource mutation.",
+        "allowed_actions": frozenset({ActionType.LIST_INSTANCES}),
+        "resource_scope": frozenset({ResourceType.EC2_INSTANCE}),
+        "policy_ids": frozenset({"R1"}),
+        "created_at": NOW,
+    }
+    values.update(overrides)
+    return MissionContract(**values)
+
+
+def test_enums_are_strings_and_reject_unknown_values():
+    assert ActionType("LIST_INSTANCES") is ActionType.LIST_INSTANCES
+    assert isinstance(ActionType.LIST_INSTANCES, str)
+    assert EnvironmentClass.PROD == "PROD"
+    with pytest.raises(ValueError):
+        ActionType("DELETE_INSTANCE")
+    with pytest.raises(ValueError):
+        EnvironmentClass("STAGING")
+    with pytest.raises(ValueError):
+        ResourceType("IAM_ROLE")
+
+
+def test_mission_defaults_leave_r8_and_r9_disabled():
+    mission = make_mission()
+    assert mission.risk_budget is None
+    assert mission.decoy_actions == frozenset()
+    assert mission.decoy_resource_ids == frozenset()
+
+
+def test_mission_accepts_risk_budget_and_decoys():
+    mission = make_mission(
+        risk_budget=30,
+        decoy_actions=frozenset({"export_all_credentials"}),
+        decoy_resource_ids=frozenset({"i-bait-001"}),
+    )
+    assert mission.risk_budget == 30
+
+
+@pytest.mark.parametrize("bad_budget", [-1, True, 1.5, "30"])
+def test_mission_rejects_invalid_risk_budget(bad_budget):
+    with pytest.raises((TypeError, ValueError)):
+        make_mission(risk_budget=bad_budget)
+
+
+def test_mission_rejects_decoy_that_collides_with_real_action():
+    with pytest.raises(ValueError, match="collides"):
+        make_mission(decoy_actions=frozenset({"list_instances"}))
+
+
+def test_mission_rejects_empty_decoy_names():
+    with pytest.raises(ValueError):
+        make_mission(decoy_actions=frozenset({"  "}))
+    with pytest.raises(ValueError):
+        make_mission(decoy_resource_ids=frozenset({""}))

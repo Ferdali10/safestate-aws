@@ -92,9 +92,28 @@ class MissionContract:
     resource_scope: frozenset[ResourceType]
     policy_ids: frozenset[str]
     created_at: datetime
+    # R8: total point budget for the mission; None means R8 is not enforced.
+    risk_budget: int | None = None
+    # R9: decoy tool names and decoy resource ids that no honest task touches.
+    decoy_actions: frozenset[str] = frozenset()
+    decoy_resource_ids: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         _require_aware_utc(self.created_at, "created_at")
+        if self.risk_budget is not None:
+            if isinstance(self.risk_budget, bool) or not isinstance(self.risk_budget, int):
+                raise TypeError("risk_budget must be an int or None")
+            if self.risk_budget < 0:
+                raise ValueError("risk_budget must not be negative")
+        real_names = {action.value for action in ActionType}
+        for name in self.decoy_actions:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("decoy_actions must contain non-empty strings")
+            if name.strip().upper() in real_names:
+                raise ValueError(f"decoy action {name!r} collides with a real action")
+        for resource_id in self.decoy_resource_ids:
+            if not isinstance(resource_id, str) or not resource_id.strip():
+                raise ValueError("decoy_resource_ids must contain non-empty strings")
 
 
 @dataclass(frozen=True, slots=True)

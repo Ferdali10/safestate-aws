@@ -11,6 +11,14 @@ from .approvals import (
     ApprovalService,
     InMemoryApprovalStore,
 )
+from .approvals import (
+    ApprovalCredential,
+    ApprovalError,
+    ApprovalExpiredError,
+    ApprovalRecord,
+    ApprovalService,
+    InMemoryApprovalStore,
+)
 from .audit import AuditEvent, AuditedDecisionService, JsonlAuditSink, VerificationResult
 from .controls import InMemoryRiskBudgetStore, InMemoryTripwireHandler, TripwireIncident
 from .models import (
@@ -36,6 +44,11 @@ __all__ = [
     "ApprovalExpiredError",
     "ApprovalRecord",
     "ApprovalService",
+    "ApprovalCredential",
+    "ApprovalError",
+    "ApprovalExpiredError",
+    "ApprovalRecord",
+    "ApprovalService",
     "ApprovalStatus",
     "AuditEvent",
     "AuditedDecisionService",
@@ -44,6 +57,7 @@ __all__ = [
     "Decision",
     "DecisionStatus",
     "EnvironmentClass",
+    "InMemoryApprovalStore",
     "InMemoryApprovalStore",
     "InMemoryRiskBudgetStore",
     "InMemoryTripwireHandler",

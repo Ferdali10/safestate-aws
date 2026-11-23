@@ -153,6 +153,10 @@ class Decision:
     policy_version: str
     evaluated_at: datetime
     approval_required: bool
+    # R8 reservation metadata; absent when the mission has no risk budget.
+    risk_reservation_id: str | None = None
+    risk_mission_key: str | None = None
+    risk_points: int = 0
 
     def __post_init__(self) -> None:
         _require_aware_utc(self.evaluated_at, "evaluated_at")
@@ -161,3 +165,13 @@ class Decision:
             raise ValueError(
                 "approval_required must be true exactly when status is REQUIRE_APPROVAL"
             )
+        if self.risk_reservation_id is None:
+            if self.risk_mission_key is not None or self.risk_points != 0:
+                raise ValueError("risk reservation metadata must be complete")
+        else:
+            if not isinstance(self.risk_reservation_id, str) or not self.risk_reservation_id:
+                raise ValueError("risk_reservation_id must be a non-empty string")
+            if not isinstance(self.risk_mission_key, str) or not self.risk_mission_key:
+                raise ValueError("risk_mission_key must be a non-empty string")
+            if isinstance(self.risk_points, bool) or not isinstance(self.risk_points, int) or self.risk_points <= 0:
+                raise ValueError("risk_points must be a positive integer")

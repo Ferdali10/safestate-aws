@@ -3,6 +3,14 @@
 The package intentionally has no AWS or LLM runtime dependency.
 """
 
+from .approvals import (
+    ApprovalCredential,
+    ApprovalError,
+    ApprovalExpiredError,
+    ApprovalRecord,
+    ApprovalService,
+    InMemoryApprovalStore,
+)
 from .audit import AuditEvent, AuditedDecisionService, JsonlAuditSink, VerificationResult
 from .controls import InMemoryRiskBudgetStore, InMemoryTripwireHandler, TripwireIncident
 from .models import (
@@ -23,6 +31,11 @@ from .validation import UnknownActionError, ValidationError, parse_request
 __all__ = [
     "ActionRequest",
     "ActionType",
+    "ApprovalCredential",
+    "ApprovalError",
+    "ApprovalExpiredError",
+    "ApprovalRecord",
+    "ApprovalService",
     "ApprovalStatus",
     "AuditEvent",
     "AuditedDecisionService",
@@ -31,6 +44,7 @@ __all__ = [
     "Decision",
     "DecisionStatus",
     "EnvironmentClass",
+    "InMemoryApprovalStore",
     "InMemoryRiskBudgetStore",
     "InMemoryTripwireHandler",
     "JsonlAuditSink",

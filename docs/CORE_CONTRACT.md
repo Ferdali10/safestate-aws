@@ -1,6 +1,6 @@
 # SafeState AWS Core Contract
 
-**Status:** Proposed contract — implementation not yet started  
+**Status:** Implemented local core contract; AWS adapters and approval lifecycle remain unimplemented  
 **Scope:** Sprint 1, Task 01 (domain model and public interfaces)  
 **Decision authority:** Deterministic SafeState Core; never the LLM
 
@@ -201,9 +201,9 @@ This layout is proposed for Task 01. Existing repository content must be preserv
 
 ## 10. Planned extensions (not part of Task 01)
 
-The README describes two rules beyond R1–R7. They are planned for later sprints and are intentionally absent from the Task 01 types and acceptance criteria.
+The domain model and public interfaces include R8 and R9. Their local deterministic enforcement is implemented in `service.py`, with in-memory simulation adapters in `controls.py`. Cloud persistence and real AgentCore session revocation remain future adapters.
 
 - **R8 — Risk budget.** Each `ActionType` has an operator-configured point cost, and each mission has a point budget. When the remaining budget cannot cover a requested action, the decision is `REQUIRE_APPROVAL`. Spent points are tracked per mission with an atomic counter so concurrent requests cannot overspend. Point values are configuration, not a measure of real-world impact.
 - **R9 — Tripwires.** A mission may declare decoy tools and decoy resources that no legitimate task uses. A request that targets a decoy results in `BLOCK`, revokes the agent session and writes an incident record containing the triggering request.
 
-Both rules must remain deterministic, fail closed, and be covered by unit tests before any AWS integration. Neither rule may turn an otherwise blocked request into an allowed one.
+Both rules are deterministic, fail closed, and covered by unit tests. R8 reservations are consumed at decision time in the current MVP, even if a human approval is later rejected or expires; this must be replaced by explicit reservation lifecycle semantics before production. R9's in-memory handler demonstrates incident recording and local session revocation only; a production adapter must revoke the real agent session and persist incidents durably. Neither rule may turn an otherwise blocked request into an allowed one.

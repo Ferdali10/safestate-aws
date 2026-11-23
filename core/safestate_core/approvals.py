@@ -163,11 +163,10 @@ class ApprovalService:
             raise ApprovalError("approval request is no longer pending")
         return updated
 
-    def consume(self, approval_id: str, request: ActionRequest) -> ApprovalRecord:
-        """Atomically consume an approved grant for the exact original request."""
-        record = self._store.get(approval_id)
-        if record is None:
-            raise ApprovalError("approval does not exist")
+    def consume(self, credential: ApprovalCredential, request: ActionRequest) -> ApprovalRecord:
+        """Atomically consume an approved grant using its secret and exact request."""
+        record = self._load_and_authenticate(credential)
+        approval_id = record.approval_id
         if record.status is not ApprovalStatus.APPROVED:
             raise ApprovalError("approval is not in APPROVED state")
         if self._now() >= record.expires_at:

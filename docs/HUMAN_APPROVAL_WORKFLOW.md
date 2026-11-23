@@ -40,7 +40,7 @@ credential = approvals.issue(request, decision)
 # The authenticated human interface presents credential.token once.
 approvals.approve(credential, approver_id="authenticated-user-id")
 # Trusted executor checks and consumes immediately before performing the action.
-approvals.consume(credential.approval_id, request)
+approvals.consume(credential, request)
 ```
 
 ## Security boundaries and production requirements

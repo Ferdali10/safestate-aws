@@ -111,6 +111,8 @@ class JsonlAuditSink:
         payload = {key: record[key] for key in required}
         if any(not isinstance(value, str) or not value for value in payload.values()):
             raise ValueError("audit record fields must be non-empty strings")
+        if payload["status"] not in {status.value for status in DecisionStatus}:
+            raise ValueError("audit status is not a recognized decision status")
         # Validate timestamp and normalize to canonical UTC representation.
         parsed = datetime.fromisoformat(payload["timestamp"])
         if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -163,6 +165,17 @@ class JsonlAuditSink:
                         raise ValueError("record must be a JSON object")
                     if record.get("schema_version") != SCHEMA_VERSION:
                         raise ValueError("unsupported schema version")
+                    if any(
+                        not isinstance(record.get(key), str) or not record[key]
+                        for key in _HASH_FIELDS
+                        if key not in {"schema_version", "previous_hash"}
+                    ):
+                        raise ValueError("record contains missing or invalid fields")
+                    if record.get("status") not in {status.value for status in DecisionStatus}:
+                        raise ValueError("record contains an invalid decision status")
+                    timestamp = datetime.fromisoformat(record["timestamp"])
+                    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                        raise ValueError("record timestamp is not timezone-aware")
                     if record.get("previous_hash") != previous_hash:
                         raise ValueError("hash-chain link mismatch")
                     expected = _event_hash(record)
@@ -205,8 +218,8 @@ class AuditedDecisionService:
         return self._record(self._service.decide_raw(payload))
 
     def _record(self, decision: Decision) -> Decision:
-        event = AuditEvent.from_decision(decision, self._new_id())
         try:
+            event = AuditEvent.from_decision(decision, self._new_id())
             self._audit.append(event.to_record())
         except Exception:  # noqa: BLE001 - audit persistence is authorization-critical
             return replace(

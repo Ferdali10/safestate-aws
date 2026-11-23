@@ -11,16 +11,15 @@ from .approvals import (
     ApprovalService,
     InMemoryApprovalStore,
 )
-from .approvals import (
-    ApprovalCredential,
-    ApprovalError,
-    ApprovalExpiredError,
-    ApprovalRecord,
-    ApprovalService,
-    InMemoryApprovalStore,
-)
 from .audit import AuditEvent, AuditedDecisionService, JsonlAuditSink, VerificationResult
 from .controls import InMemoryRiskBudgetStore, InMemoryTripwireHandler, TripwireIncident
+from .execution import (
+    DecisionRevalidator,
+    ExecutionGateway,
+    Executor,
+    GatewayResult,
+    SimulatedAWSExecutor,
+)
 from .models import (
     ActionRequest,
     ActionType,
@@ -44,20 +43,18 @@ __all__ = [
     "ApprovalExpiredError",
     "ApprovalRecord",
     "ApprovalService",
-    "ApprovalCredential",
-    "ApprovalError",
-    "ApprovalExpiredError",
-    "ApprovalRecord",
-    "ApprovalService",
     "ApprovalStatus",
     "AuditEvent",
     "AuditedDecisionService",
     "DEFAULT_ACTION_RISK_COSTS",
     "DefaultDecisionService",
     "Decision",
+    "DecisionRevalidator",
     "DecisionStatus",
     "EnvironmentClass",
-    "InMemoryApprovalStore",
+    "ExecutionGateway",
+    "Executor",
+    "GatewayResult",
     "InMemoryApprovalStore",
     "InMemoryRiskBudgetStore",
     "InMemoryTripwireHandler",
@@ -66,6 +63,7 @@ __all__ = [
     "PolicyEffect",
     "ResourceContext",
     "ResourceType",
+    "SimulatedAWSExecutor",
     "TripwireIncident",
     "UnknownActionError",
     "ValidationError",

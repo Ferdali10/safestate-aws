@@ -1,6 +1,7 @@
 """Fail-closed orchestration for the framework-independent SafeState core."""
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Mapping
 
 from .actions import classify_unknown_action
@@ -10,6 +11,8 @@ from .interfaces import (
     MissionProvider,
     PolicyEngine,
     ResourceContextProvider,
+    RiskBudgetStore,
+    TripwireHandler,
 )
 from .models import (
     ActionRequest,
@@ -30,6 +33,17 @@ from .validation import (
 
 SERVICE_POLICY_VERSION = "2026-11-22.1"
 
+DEFAULT_ACTION_RISK_COSTS = {
+    ActionType.LIST_INSTANCES: 1,
+    ActionType.DESCRIBE_INSTANCE: 1,
+    ActionType.LIST_VOLUMES: 1,
+    ActionType.DESCRIBE_VOLUME: 1,
+    ActionType.LIST_BUCKETS: 1,
+    ActionType.GET_BUCKET_METADATA: 1,
+    ActionType.GET_COST_AND_UTILIZATION: 2,
+    ActionType.REQUEST_STOP_INSTANCE: 5,
+}
+
 
 class DefaultDecisionService:
     """Validate requests, load trusted context, then delegate to the policy engine."""
@@ -42,6 +56,9 @@ class DefaultDecisionService:
         clock: Clock,
         id_generator: IdGenerator,
         policy_version: str = SERVICE_POLICY_VERSION,
+        risk_budget_store: RiskBudgetStore | None = None,
+        tripwire_handler: TripwireHandler | None = None,
+        risk_costs: Mapping[ActionType, int] | None = None,
     ) -> None:
         self._missions = mission_provider
         self._resources = resource_provider
@@ -49,6 +66,17 @@ class DefaultDecisionService:
         self._clock = clock
         self._new_id = id_generator
         self._policy_version = policy_version
+        self._risk_budget = risk_budget_store
+        self._tripwires = tripwire_handler
+        self._risk_costs = dict(risk_costs or DEFAULT_ACTION_RISK_COSTS)
+        if any(
+            not isinstance(action, ActionType)
+            or isinstance(cost, bool)
+            or not isinstance(cost, int)
+            or cost <= 0
+            for action, cost in self._risk_costs.items()
+        ):
+            raise ValueError("risk costs must map ActionType values to positive integers")
 
     def decide_raw(self, payload: Mapping[str, Any]) -> Decision:
         """Parse an untrusted payload and return a decision without raising validation errors."""
@@ -56,6 +84,9 @@ class DefaultDecisionService:
         try:
             request = parse_request(payload, now=self._clock())
         except UnknownActionError as exc:
+            tripwire_decision = self._check_decoy_action(payload, exc.raw_action, request_id)
+            if tripwire_decision is not None:
+                return tripwire_decision
             rule_id, reason_code = classify_unknown_action(exc.raw_action)
             return self._blocked(
                 request_id,
@@ -123,6 +154,18 @@ class DefaultDecisionService:
                 )
                 or not isinstance(mission.policy_ids, frozenset)
                 or any(not isinstance(item, str) for item in mission.policy_ids)
+                or not isinstance(mission.decoy_actions, frozenset)
+                or any(not isinstance(item, str) for item in mission.decoy_actions)
+                or not isinstance(mission.decoy_resource_ids, frozenset)
+                or any(not isinstance(item, str) for item in mission.decoy_resource_ids)
+                or (
+                    mission.risk_budget is not None
+                    and (
+                        isinstance(mission.risk_budget, bool)
+                        or not isinstance(mission.risk_budget, int)
+                        or mission.risk_budget < 0
+                    )
+                )
             ):
                 return self._blocked(
                     request_id,
@@ -140,6 +183,15 @@ class DefaultDecisionService:
                     "R7",
                     "MISSION_MISMATCH",
                     "The request does not match the active trusted mission.",
+                )
+
+            if request.resource_id in mission.decoy_resource_ids:
+                return self._tripwire_block(
+                    request.agent_id,
+                    request.mission_id,
+                    request_id,
+                    "DECOY_RESOURCE",
+                    request.resource_id,
                 )
 
             resource = self._resources.get_context(
@@ -188,6 +240,43 @@ class DefaultDecisionService:
                     "POLICY_ENGINE_INVALID_RESULT",
                     "The policy engine returned an invalid decision.",
                 )
+            if decision.status is not DecisionStatus.BLOCK and mission.risk_budget is not None:
+                if self._risk_budget is None:
+                    return self._blocked(
+                        request_id,
+                        "R7",
+                        "RISK_BUDGET_STORE_UNAVAILABLE",
+                        "A mission risk budget is configured but no trusted budget store is available.",
+                    )
+                points = self._risk_costs.get(request.action)
+                if points is None:
+                    return self._blocked(
+                        request_id,
+                        "R7",
+                        "RISK_COST_UNCONFIGURED",
+                        "No risk cost is configured for this action.",
+                    )
+                mission_key = f"{mission.agent_id}:{mission.mission_id}:{mission.version}"
+                try:
+                    reserved = self._risk_budget.try_reserve(
+                        mission_key, points, mission.risk_budget
+                    )
+                except Exception:  # noqa: BLE001 - budget store errors fail closed
+                    return self._blocked(
+                        request_id,
+                        "R7",
+                        "RISK_BUDGET_STORE_ERROR",
+                        "The risk budget could not be checked safely; the request is blocked.",
+                    )
+                if not reserved:
+                    return replace(
+                        decision,
+                        status=DecisionStatus.REQUIRE_APPROVAL,
+                        rule_id="R8",
+                        reason_code="RISK_BUDGET_EXCEEDED",
+                        reason="The remaining mission risk budget cannot cover this action; human approval is required.",
+                        approval_required=True,
+                    )
             return decision
         except Exception:  # noqa: BLE001 - provider or policy faults must fail closed
             return self._blocked(
@@ -196,6 +285,64 @@ class DefaultDecisionService:
                 "DECISION_PIPELINE_ERROR",
                 "The decision pipeline failed; the request is blocked.",
             )
+
+    def _check_decoy_action(
+        self, payload: object, raw_action: str, request_id: str
+    ) -> Decision | None:
+        if not isinstance(payload, Mapping):
+            return None
+        agent_id = payload.get("agent_id")
+        mission_id = payload.get("mission_id")
+        if not isinstance(agent_id, str) or not agent_id or not isinstance(mission_id, str) or not mission_id:
+            return None
+        try:
+            mission = self._missions.get_active_mission(agent_id, mission_id)
+        except Exception:  # noqa: BLE001 - normal validation path will fail closed
+            return None
+        if (
+            not isinstance(mission, MissionContract)
+            or mission.agent_id != agent_id
+            or mission.mission_id != mission_id
+            or not isinstance(mission.decoy_actions, frozenset)
+        ):
+            return None
+        decoys = {item.strip().upper() for item in mission.decoy_actions if isinstance(item, str)}
+        if raw_action.strip().upper() not in decoys:
+            return None
+        return self._tripwire_block(
+            agent_id, mission_id, request_id, "DECOY_ACTION", raw_action
+        )
+
+    def _tripwire_block(
+        self,
+        agent_id: str,
+        mission_id: str,
+        request_id: str,
+        trigger_type: str,
+        target: str,
+    ) -> Decision:
+        if self._tripwires is None:
+            return self._blocked(
+                request_id,
+                "R7",
+                "TRIPWIRE_HANDLER_UNAVAILABLE",
+                "A decoy was targeted but no trusted tripwire handler is configured; the request is blocked.",
+            )
+        try:
+            self._tripwires.trigger(agent_id, mission_id, request_id, trigger_type, target)
+        except Exception:  # noqa: BLE001 - failure to revoke or record an incident fails closed
+            return self._blocked(
+                request_id,
+                "R7",
+                "TRIPWIRE_HANDLER_FAILED",
+                "The tripwire could not confirm incident recording and session revocation; the request is blocked.",
+            )
+        return self._blocked(
+            request_id,
+            "R9",
+            "TRIPWIRE_TRIGGERED",
+            "A mission decoy was targeted. The request is blocked and the agent session was revoked.",
+        )
 
     def _blocked(
         self, request_id: str, rule_id: str, reason_code: str, reason: str

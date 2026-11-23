@@ -195,3 +195,75 @@ def test_ttl_must_be_positive_and_bounded():
         ApprovalService(InMemoryApprovalStore(), lambda: NOW, lambda: "id", timedelta(0))
     with pytest.raises(ValueError):
         ApprovalService(InMemoryApprovalStore(), lambda: NOW, lambda: "id", timedelta(days=2))
+
+
+def test_rejected_approval_releases_reserved_budget():
+    from safestate_core.controls import InMemoryRiskBudgetStore
+    ledger = InMemoryRiskBudgetStore()
+    assert ledger.reserve("agent:mission:v1", "req-1", 2, 5)
+    req = request()
+    decision_with_reservation = decision(
+        risk_reservation_id="req-1",
+        risk_mission_key="agent:mission:v1",
+        risk_points=2,
+    )
+    store = InMemoryApprovalStore()
+    svc = ApprovalService(
+        store, lambda: NOW, lambda: "approval-risk",
+        risk_budget_store=ledger,
+    )
+    credential = svc.issue(req, decision_with_reservation)
+    svc.reject(credential, "human:alice")
+    assert ledger.reserved("agent:mission:v1") == 0
+    assert ledger.spent("agent:mission:v1") == 0
+
+
+def test_expiring_approved_request_releases_reserved_budget():
+    from safestate_core.controls import InMemoryRiskBudgetStore
+    ledger = InMemoryRiskBudgetStore()
+    assert ledger.reserve("agent:mission:v1", "req-1", 2, 5)
+    req = request()
+    decision_with_reservation = decision(
+        risk_reservation_id="req-1",
+        risk_mission_key="agent:mission:v1",
+        risk_points=2,
+    )
+    store = InMemoryApprovalStore()
+    now = [NOW]
+    svc = ApprovalService(
+        store, lambda: now[0], lambda: "approval-expire",
+        timedelta(minutes=1), risk_budget_store=ledger,
+    )
+    credential = svc.issue(req, decision_with_reservation)
+    svc.approve(credential, "human:alice")
+    now[0] += timedelta(minutes=1)
+    expired = svc.expire(credential)
+    assert expired.status is ApprovalStatus.EXPIRED
+    assert ledger.reserved("agent:mission:v1") == 0
+
+
+def test_issue_failure_releases_reserved_budget():
+    from safestate_core.controls import InMemoryRiskBudgetStore
+    class BrokenStore:
+        def create(self, record):
+            raise RuntimeError("disk unavailable")
+        def get(self, approval_id):
+            return None
+        def transition(self, approval_id, expected, updated):
+            return False
+    ledger = InMemoryRiskBudgetStore()
+    assert ledger.reserve("agent:mission:v1", "req-1", 2, 5)
+    svc = ApprovalService(
+        BrokenStore(), lambda: NOW, lambda: "approval-broken",
+        risk_budget_store=ledger,
+    )
+    with pytest.raises(RuntimeError):
+        svc.issue(
+            request(),
+            decision(
+                risk_reservation_id="req-1",
+                risk_mission_key="agent:mission:v1",
+                risk_points=2,
+            ),
+        )
+    assert ledger.reserved("agent:mission:v1") == 0

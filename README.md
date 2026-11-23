@@ -77,7 +77,7 @@ The agent runs on the **Amazon Bedrock AgentCore managed harness** (Bedrock Agen
 
 ### How the risk budget works
 
-Every action type has an operator-configurable point cost. The local defaults are 1 point for metadata reads, 2 for cost/utilization queries and 5 for a stop request. A mission starts with a fixed budget. The engine reserves points atomically per mission version, so concurrent requests cannot overspend. When the remaining budget cannot cover an action, the decision becomes `REQUIRE_APPROVAL`. In this MVP, points are consumed when a non-BLOCK decision is issued, including requests awaiting approval; rejected or expired approvals are not refunded. This conservative accounting limitation is documented and must be replaced by reservation/settlement semantics before production use. The point values are configuration, not a claim about real-world risk.
+Every action type has an operator-configurable point cost. The local defaults are 1 point for metadata reads, 1 for cost/utilization queries and 20 for a stop request. A mission starts with a fixed budget. The engine reserves points atomically per mission version, so concurrent requests cannot overspend. When the remaining budget cannot cover an action, the decision becomes `REQUIRE_APPROVAL`. In this MVP, points are consumed when a non-BLOCK decision is issued, including requests awaiting approval; rejected or expired approvals are not refunded. This conservative accounting limitation is documented and must be replaced by reservation/settlement semantics before production use. The point values are configuration, not a claim about real-world risk.
 
 ### How tripwires work
 

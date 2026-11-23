@@ -68,6 +68,23 @@ class RiskBudgetStore(Protocol):
     def spent(self, mission_key: str) -> int: ...
 
 
+class TripwireHandler(Protocol):
+    """Record a decoy incident and revoke the affected agent session.
+
+    Implementations must make incident recording and session revocation durable
+    before returning. If either operation fails, the caller blocks the request.
+    """
+
+    def trigger(
+        self,
+        agent_id: str,
+        mission_id: str,
+        request_id: str,
+        trigger_type: str,
+        target: str,
+    ) -> None: ...
+
+
 class AuditSink(Protocol):
     """Append-only audit destination. Raising means persistence failed."""
 

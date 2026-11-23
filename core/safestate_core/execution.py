@@ -51,11 +51,13 @@ class ExecutionGateway:
         approval_service: ApprovalService,
         executor: Executor,
         revalidator: DecisionRevalidator | None = None,
+        risk_budget_store=None,
     ) -> None:
         self._decisions = decision_service
         self._approvals = approval_service
         self._executor = executor
         self._revalidator = revalidator
+        self._risk_budget = risk_budget_store
 
     def submit(self, request: ActionRequest) -> GatewayResult:
         """Evaluate a request; execute ALLOW, or issue a pending approval."""
@@ -110,21 +112,44 @@ class ExecutionGateway:
         return self._execute_after_allow(request, fresh)
 
     def _execute_after_allow(
-        self, request: ActionRequest, decision: Decision
+        self, request: ActionRequest, decision: Decision,
+        reservation_id: str | None = None,
     ) -> GatewayResult:
         if decision.status is not DecisionStatus.ALLOW and (
             decision.status is not DecisionStatus.REQUIRE_APPROVAL
         ):
             return self._blocked_result(decision, "DECISION_NOT_EXECUTABLE")
+        effective_reservation = reservation_id or decision.risk_reservation_id
+        if effective_reservation is not None and self._risk_budget is None:
+            return self._blocked_result(decision, "RISK_LEDGER_UNAVAILABLE")
         try:
             result = self._executor.execute(request)
             if not isinstance(result, Mapping):
                 raise TypeError("executor result must be a mapping")
-            return GatewayResult(
-                outcome="EXECUTED", decision=decision, execution=dict(result)
-            )
         except Exception:  # noqa: BLE001 - execution errors are never reported as success
+            if effective_reservation is not None:
+                try:
+                    released = self._risk_budget.release(effective_reservation)
+                    if released is not True:
+                        raise RuntimeError("reservation release returned false")
+                except Exception:  # noqa: BLE001
+                    return self._blocked_result(decision, "EXECUTOR_FAILED_RISK_RELEASE_FAILED")
             return self._blocked_result(decision, "EXECUTOR_FAILED")
+        if effective_reservation is not None:
+            try:
+                settled = self._risk_budget.settle(effective_reservation)
+            except Exception:  # noqa: BLE001
+                settled = False
+            if settled is not True:
+                return GatewayResult(
+                    outcome="EXECUTED_ACCOUNTING_FAILED",
+                    decision=decision,
+                    execution=dict(result),
+                    error_code="RISK_SETTLEMENT_FAILED",
+                )
+        return GatewayResult(
+            outcome="EXECUTED", decision=decision, execution=dict(result)
+        )
 
     @staticmethod
     def _valid_decision(decision: object, request: ActionRequest) -> bool:

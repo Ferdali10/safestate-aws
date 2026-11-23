@@ -3,6 +3,7 @@
 The package intentionally has no AWS or LLM runtime dependency.
 """
 
+from .audit import AuditEvent, AuditedDecisionService, JsonlAuditSink, VerificationResult
 from .models import (
     ActionRequest,
     ActionType,
@@ -21,14 +22,18 @@ __all__ = [
     "ActionRequest",
     "ActionType",
     "ApprovalStatus",
+    "AuditEvent",
+    "AuditedDecisionService",
     "Decision",
     "DecisionStatus",
     "EnvironmentClass",
+    "JsonlAuditSink",
     "MissionContract",
     "PolicyEffect",
     "ResourceContext",
     "ResourceType",
     "UnknownActionError",
     "ValidationError",
+    "VerificationResult",
     "parse_request",
 ]

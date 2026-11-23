@@ -171,8 +171,6 @@ class JsonlAuditSink:
                         if key not in {"schema_version", "previous_hash"}
                     ):
                         raise ValueError("record contains missing or invalid fields")
-                    if record.get("status") not in {status.value for status in DecisionStatus}:
-                        raise ValueError("record contains an invalid decision status")
                     timestamp = datetime.fromisoformat(record["timestamp"])
                     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
                         raise ValueError("record timestamp is not timezone-aware")
@@ -181,6 +179,8 @@ class JsonlAuditSink:
                     expected = _event_hash(record)
                     if record.get("event_hash") != expected:
                         raise ValueError("event hash mismatch")
+                    if record.get("status") not in {status.value for status in DecisionStatus}:
+                        raise ValueError("record contains an invalid decision status")
                     previous_hash = expected
                     checked += 1
         except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:

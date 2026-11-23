@@ -80,19 +80,30 @@ def test_approve_then_consume_exact_request_once():
     credential = h.issue(req)
     approved = h.service.approve(credential, "human:alice")
     assert approved.status is ApprovalStatus.APPROVED
-    consumed = h.service.consume(credential.approval_id, req)
+    consumed = h.service.consume(credential, req)
     assert consumed.status is ApprovalStatus.CONSUMED
     assert consumed.approved_by == "human:alice"
     with pytest.raises(ApprovalError):
-        h.service.consume(credential.approval_id, req)
+        h.service.consume(credential, req)
 
+
+
+def test_wrong_token_cannot_consume_an_approved_grant():
+    h = Harness()
+    req = request()
+    credential = h.issue(req)
+    h.service.approve(credential, "human:alice")
+    forged = replace(credential, token="attacker-token")
+    with pytest.raises(ApprovalError):
+        h.service.consume(forged, req)
+    assert h.store.get(credential.approval_id).status is ApprovalStatus.APPROVED
 
 def test_rejection_cannot_be_consumed():
     h = Harness()
     credential = h.issue()
     h.service.reject(credential, "human:bob")
     with pytest.raises(ApprovalError):
-        h.service.consume(credential.approval_id, request())
+        h.service.consume(credential, request())
 
 
 def test_wrong_token_is_rejected():
@@ -124,7 +135,7 @@ def test_approval_cannot_be_reused_for_changed_request(changes):
     credential = h.issue(req)
     h.service.approve(credential, "human:alice")
     with pytest.raises(ApprovalError):
-        h.service.consume(credential.approval_id, request(**changes))
+        h.service.consume(credential, request(**changes))
 
 
 def test_expiry_blocks_human_decision_and_marks_record_expired():
@@ -143,7 +154,7 @@ def test_expiry_after_approval_blocks_consumption():
     h.service.approve(credential, "human:alice")
     h.now += timedelta(minutes=1)
     with pytest.raises(ApprovalExpiredError):
-        h.service.consume(credential.approval_id, req)
+        h.service.consume(credential, req)
 
 
 def test_approval_cannot_be_approved_twice():
@@ -165,7 +176,7 @@ def test_concurrent_consumption_has_exactly_one_winner():
     def consume():
         barrier.wait()
         try:
-            h.service.consume(credential.approval_id, req)
+            h.service.consume(credential, req)
             outcomes.append("consumed")
         except ApprovalError:
             outcomes.append("rejected")

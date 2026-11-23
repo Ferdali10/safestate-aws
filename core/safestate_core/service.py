@@ -4,7 +4,42 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Mapping
 
-from .actions import classify_unknown_action
+from .actions import DEFAULT_RISK_COSTS, classify_unknown_action, normalize_action_name
+from .interfaces import (
+    Clock,
+    IdGenerator,
+    MissionProvider,
+    PolicyEngine,
+    ResourceContextProvider,
+    RiskBudgetStore,
+    TripwireHandler,
+)
+from .models import (
+    ActionRequest,
+    ActionType,
+    Decision,
+    DecisionStatus,
+    EnvironmentClass,
+    MissionContract,
+    ResourceContext,
+    ResourceType,
+)
+from .validation import (
+    UnknownActionError,
+    ValidationError,
+    parse_request,
+    validate_request,
+)
+
+SERVICE_POLICY_VERSION = "2026-11-22.1"
+
+DEFAULT_ACTION_RISK_COSTS = DEFAULT_RISK_COSTS"Fail-closed orchestration for the framework-independent SafeState core."""
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any, Mapping
+
+from .actions import DEFAULT_RISK_COSTS, classify_unknown_action, normalize_action_name
 from .interfaces import (
     Clock,
     IdGenerator,
@@ -68,7 +103,9 @@ class DefaultDecisionService:
         self._policy_version = policy_version
         self._risk_budget = risk_budget_store
         self._tripwires = tripwire_handler
-        self._risk_costs = dict(risk_costs or DEFAULT_ACTION_RISK_COSTS)
+        self._risk_costs = dict(
+            DEFAULT_ACTION_RISK_COSTS if risk_costs is None else risk_costs
+        )
         if any(
             not isinstance(action, ActionType)
             or isinstance(cost, bool)
@@ -185,6 +222,20 @@ class DefaultDecisionService:
                     "The request does not match the active trusted mission.",
                 )
 
+            if mission.risk_budget is not None and "R8" not in mission.policy_ids:
+                return self._blocked(
+                    request_id, "R7", "POLICY_SET_INCOMPLETE",
+                    "A risk budget is configured but R8 is not enabled in the trusted mission.",
+                )
+            if (
+                (mission.decoy_actions or mission.decoy_resource_ids)
+                and "R9" not in mission.policy_ids
+            ):
+                return self._blocked(
+                    request_id, "R7", "POLICY_SET_INCOMPLETE",
+                    "Tripwires are configured but R9 is not enabled in the trusted mission.",
+                )
+
             if request.resource_id in mission.decoy_resource_ids:
                 return self._tripwire_block(
                     request.agent_id,
@@ -261,6 +312,8 @@ class DefaultDecisionService:
                     reserved = self._risk_budget.try_reserve(
                         mission_key, points, mission.risk_budget
                     )
+                    if not isinstance(reserved, bool):
+                        raise TypeError("risk budget store must return bool")
                 except Exception:  # noqa: BLE001 - budget store errors fail closed
                     return self._blocked(
                         request_id,
@@ -300,14 +353,24 @@ class DefaultDecisionService:
         except Exception:  # noqa: BLE001 - normal validation path will fail closed
             return None
         if (
-            not isinstance(mission, MissionContract)
+            not isinstance(raw_action, str)
+            or not isinstance(mission, MissionContract)
             or mission.agent_id != agent_id
             or mission.mission_id != mission_id
+            or mission.version != payload.get("mission_version")
             or not isinstance(mission.decoy_actions, frozenset)
         ):
             return None
-        decoys = {item.strip().upper() for item in mission.decoy_actions if isinstance(item, str)}
-        if raw_action.strip().upper() not in decoys:
+        try:
+            normalized_action = normalize_action_name(raw_action)
+            decoys = {
+                normalize_action_name(item)
+                for item in mission.decoy_actions
+                if isinstance(item, str)
+            }
+        except TypeError:
+            return None
+        if normalized_action not in decoys:
             return None
         return self._tripwire_block(
             agent_id, mission_id, request_id, "DECOY_ACTION", raw_action

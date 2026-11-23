@@ -30,7 +30,7 @@ version receives a separate counter. The default point costs are:
 | LIST_BUCKETS | 1 |
 | GET_BUCKET_METADATA | 1 |
 | GET_COST_AND_UTILIZATION | 2 |
-| REQUEST_STOP_INSTANCE | 5 |
+| REQUEST_STOP_INSTANCE | 20 |
 
 Costs can be overridden through the service constructor. Every configured cost
 must be a positive integer. A mission with `risk_budget=None` does not enable

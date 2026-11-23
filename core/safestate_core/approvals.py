@@ -145,7 +145,11 @@ class ApprovalService:
             risk_mission_key=decision.risk_mission_key,
             risk_points=decision.risk_points,
         )
-        self._store.create(record)
+        try:
+            self._store.create(record)
+        except Exception:
+            self._release_reservation(record)
+            raise
         return ApprovalCredential(approval_id, token, record.expires_at)
 
     def approve(self, credential: ApprovalCredential, approver_id: str) -> ApprovalRecord:
@@ -175,6 +179,20 @@ class ApprovalService:
         if target is ApprovalStatus.REJECTED:
             self._release_reservation(record)
         return updated
+
+    def expire(self, credential: ApprovalCredential) -> ApprovalRecord:
+        """Explicitly expire a pending/approved request and release its reservation."""
+        record = self._load_and_authenticate(credential)
+        now = self._now()
+        if now < record.expires_at:
+            raise ApprovalError("approval request has not expired")
+        if record.status not in {ApprovalStatus.PENDING, ApprovalStatus.APPROVED}:
+            raise ApprovalError("approval request cannot be expired from its current state")
+        expired = replace(record, status=ApprovalStatus.EXPIRED)
+        if not self._store.transition(record.approval_id, record.status, expired):
+            raise ApprovalError("approval state changed concurrently")
+        self._release_reservation(record)
+        return expired
 
     def consume(self, credential: ApprovalCredential, request: ActionRequest) -> ApprovalRecord:
         """Atomically consume an approved grant using its secret and exact request."""

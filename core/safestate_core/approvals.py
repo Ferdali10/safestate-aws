@@ -32,6 +32,9 @@ class ApprovalRecord:
     approved_by: str | None = None
     decided_at: datetime | None = None
     consumed_at: datetime | None = None
+    risk_reservation_id: str | None = None
+    risk_mission_key: str | None = None
+    risk_points: int = 0
 
 
 class ApprovalStore(Protocol):
@@ -102,6 +105,7 @@ class ApprovalService:
         clock,
         id_generator,
         ttl: timedelta = timedelta(minutes=10),
+        risk_budget_store=None,
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("approval TTL must be positive")
@@ -111,6 +115,7 @@ class ApprovalService:
         self._clock = clock
         self._new_id = id_generator
         self._ttl = ttl
+        self._risk_budget = risk_budget_store
 
     def issue(self, request: ActionRequest, decision: Decision) -> ApprovalCredential:
         """Issue an opaque credential only for a genuine REQUIRE_APPROVAL decision."""
@@ -122,6 +127,8 @@ class ApprovalService:
             or decision.request_id != request.request_id
         ):
             raise ApprovalError("decision does not authorize an approval workflow")
+        if decision.risk_reservation_id is not None and self._risk_budget is None:
+            raise ApprovalError("risk budget ledger is required for reserved approvals")
         now = self._now()
         approval_id = self._new_id()
         token = secrets.token_urlsafe(32)
@@ -134,6 +141,9 @@ class ApprovalService:
             created_at=now,
             expires_at=now + self._ttl,
             status=ApprovalStatus.PENDING,
+            risk_reservation_id=decision.risk_reservation_id,
+            risk_mission_key=decision.risk_mission_key,
+            risk_points=decision.risk_points,
         )
         self._store.create(record)
         return ApprovalCredential(approval_id, token, record.expires_at)
@@ -154,13 +164,16 @@ class ApprovalService:
         now = self._now()
         if now >= record.expires_at:
             expired = replace(record, status=ApprovalStatus.EXPIRED)
-            self._store.transition(record.approval_id, ApprovalStatus.PENDING, expired)
+            if self._store.transition(record.approval_id, ApprovalStatus.PENDING, expired):
+                self._release_reservation(record)
             raise ApprovalExpiredError("approval request has expired")
         updated = replace(
             record, status=target, approved_by=approver_id.strip(), decided_at=now
         )
         if not self._store.transition(record.approval_id, ApprovalStatus.PENDING, updated):
             raise ApprovalError("approval request is no longer pending")
+        if target is ApprovalStatus.REJECTED:
+            self._release_reservation(record)
         return updated
 
     def consume(self, credential: ApprovalCredential, request: ActionRequest) -> ApprovalRecord:
@@ -171,7 +184,8 @@ class ApprovalService:
             raise ApprovalError("approval is not in APPROVED state")
         if self._now() >= record.expires_at:
             expired = replace(record, status=ApprovalStatus.EXPIRED)
-            self._store.transition(approval_id, ApprovalStatus.APPROVED, expired)
+            if self._store.transition(approval_id, ApprovalStatus.APPROVED, expired):
+                self._release_reservation(record)
             raise ApprovalExpiredError("approval request has expired")
         if request_fingerprint(request) != record.request_fingerprint:
             raise ApprovalError("approval is bound to a different action request")
@@ -181,6 +195,22 @@ class ApprovalService:
         if not self._store.transition(approval_id, ApprovalStatus.APPROVED, consumed):
             raise ApprovalError("approval was already consumed or changed")
         return consumed
+
+    def reservation_id_for(self, credential: ApprovalCredential) -> str | None:
+        """Return reservation metadata only after authenticating the secret."""
+        return self._load_and_authenticate(credential).risk_reservation_id
+
+    def _release_reservation(self, record: ApprovalRecord) -> None:
+        if record.risk_reservation_id is None:
+            return
+        if self._risk_budget is None:
+            raise ApprovalError("risk budget ledger unavailable; reservation cannot be released")
+        try:
+            released = self._risk_budget.release(record.risk_reservation_id)
+        except Exception as exc:
+            raise ApprovalError("risk reservation release failed") from exc
+        if released is not True:
+            raise ApprovalError("risk reservation could not be released")
 
     def _load_and_authenticate(self, credential: ApprovalCredential) -> ApprovalRecord:
         if not isinstance(credential, ApprovalCredential):

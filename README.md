@@ -77,11 +77,11 @@ The agent runs on the **Amazon Bedrock AgentCore managed harness** (Bedrock Agen
 
 ### How the risk budget works
 
-Every action type has a point cost set by the operator, for example a metadata read costs 1 and a stop request costs 20. A mission starts with a fixed budget. The engine tracks spent points per mission with an atomic counter, so many small allowed actions cannot add up to a large effect. When the remaining budget cannot cover an action, the decision becomes `REQUIRE_APPROVAL` instead of `ALLOW`. The point values are configuration and must be tuned; they are not a claim about real-world risk.
+Every action type has an operator-configurable point cost. The local defaults are 1 point for metadata reads, 2 for cost/utilization queries and 5 for a stop request. A mission starts with a fixed budget. The engine reserves points atomically per mission version, so concurrent requests cannot overspend. When the remaining budget cannot cover an action, the decision becomes `REQUIRE_APPROVAL`. In this MVP, points are consumed when a non-BLOCK decision is issued, including requests awaiting approval; rejected or expired approvals are not refunded. This conservative accounting limitation is documented and must be replaced by reservation/settlement semantics before production use. The point values are configuration, not a claim about real-world risk.
 
 ### How tripwires work
 
-A tripwire is a decoy that no honest mission ever touches, such as a tool named `export_all_credentials` or an instance that exists only as bait. Any request that targets a decoy produces `BLOCK`, revokes the agent session, and writes an incident record with the request that triggered it. This turns a successful prompt injection into evidence instead of a silent compromise.
+A tripwire is a decoy that no honest mission ever touches, such as a tool named `export_all_credentials` or an instance that exists only as bait. The local core detects configured decoy action names and resource IDs, then calls an injected handler that must record an incident and revoke the agent session before returning. The included in-memory handler demonstrates this behavior in tests only; it does not revoke a real AgentCore session. A production session adapter and durable incident store remain future work.
 
 ## 4. Layered enforcement: rule to mechanism
 
@@ -214,22 +214,21 @@ safestate-aws/
 └── README.md
 ```
 
-Further directories (decision engine, approval, executor, audit, infrastructure) are added when their implementation begins.
+The local deterministic core, audit journal and R8/R9 simulation adapters are implemented. AWS adapters, approval workflow, executor and infrastructure are intentionally not part of this local-only stage. See [R8/R9 controls](docs/R8_R9_CONTROLS.md).
 
 ## 11. Project status
 
 | Area | Status |
 |------|--------|
 | Product vision and MVP scope | Defined |
-| Mission rules R1–R9 | Drafted; enforcement to be implemented and verified |
-| Core contract (`docs/CORE_CONTRACT.md`) | Defined for R1–R7; R8 and R9 are planned extensions |
-| Core domain models (`core/safestate_core/models.py`) | Written; test suite not yet passing (see build log) |
-| Decision engine | Not yet implemented |
-| Risk budget | Not yet implemented |
-| Tripwires | Not yet implemented |
-| AgentCore agent and Gateway integration | Not yet implemented |
-| Human approval workflow | Not yet implemented |
-| Audit trail | Not yet implemented |
+| Mission rules R1–R7 | Implemented in local deterministic core; CI verified |
+| R8 risk budget | Implemented with atomic in-memory store and fail-closed behavior; AWS persistence not implemented |
+| R9 tripwires | Implemented with decoy detection and in-memory incident/session revocation adapter; real AgentCore revocation not implemented |
+| DecisionService | Implemented; validates requests and trusted context before policy evaluation |
+| Audit journal | Local JSONL + SHA-256 hash chain; external durable storage not implemented |
+| AgentCore agent and Gateway integration | Not implemented |
+| Human approval workflow | Not implemented |
+| AWS executor and IAM boundary | Not implemented |
 | Adversarial tests A1–A10 | Planned; results pending |
 | End-to-end demo and screenshots | Pending |
 

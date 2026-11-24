@@ -220,14 +220,11 @@ class DefaultDecisionService:
                     "The policy engine returned an invalid decision.",
                 )
 
-            if (
-                decision.status is not DecisionStatus.BLOCK
-                and mission.risk_budget is not None
-            ):
+            if decision.status is not DecisionStatus.BLOCK and mission.risk_budget is not None:
                 if self._risk_budget is None:
                     return self._blocked(
                         request_id, "R7", "RISK_BUDGET_STORE_UNAVAILABLE",
-                        "A mission risk budget is configured but no trusted budget store is available.",
+                        "A mission risk budget is configured but no trusted reservation ledger is available.",
                     )
                 points = self._risk_costs.get(request.action)
                 if points is None:
@@ -235,32 +232,30 @@ class DefaultDecisionService:
                         request_id, "R7", "RISK_COST_UNCONFIGURED",
                         "No risk cost is configured for this action.",
                     )
-                mission_key = (
-                    f"{mission.agent_id}:{mission.mission_id}:{mission.version}"
-                )
+                mission_key = f"{mission.agent_id}:{mission.mission_id}:{mission.version}"
+                reservation_id = f"{mission_key}:{request.request_id}"
                 try:
-                    reserved = self._risk_budget.try_reserve(
-                        mission_key, points, mission.risk_budget
+                    reserved = self._risk_budget.reserve(
+                        mission_key, reservation_id, points, mission.risk_budget
                     )
                     if not isinstance(reserved, bool):
-                        raise TypeError("risk budget store must return bool")
-                except Exception:  # noqa: BLE001 - budget store errors fail closed
+                        raise TypeError("risk budget reserve must return bool")
+                except Exception:  # noqa: BLE001 - ledger errors fail closed
                     return self._blocked(
                         request_id, "R7", "RISK_BUDGET_STORE_ERROR",
-                        "The risk budget could not be checked safely; the request is blocked.",
+                        "The risk budget reservation failed; the request is blocked.",
                     )
                 if not reserved:
-                    return replace(
-                        decision,
-                        status=DecisionStatus.REQUIRE_APPROVAL,
-                        rule_id="R8",
-                        reason_code="RISK_BUDGET_EXCEEDED",
-                        reason=(
-                            "The remaining mission risk budget cannot cover this "
-                            "action; human approval is required."
-                        ),
-                        approval_required=True,
+                    return self._blocked(
+                        request_id, "R8", "RISK_BUDGET_EXCEEDED",
+                        "The mission risk budget has insufficient available points.",
                     )
+                decision = replace(
+                    decision,
+                    risk_reservation_id=reservation_id,
+                    risk_mission_key=mission_key,
+                    risk_points=points,
+                )
             return decision
         except Exception:  # noqa: BLE001 - provider or policy faults fail closed
             return self._blocked(

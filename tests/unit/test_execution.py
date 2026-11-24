@@ -202,3 +202,72 @@ def test_simulator_rejects_unknown_action_even_if_constructed_unsafely():
     forged = replace(req, action="DELETE_ALL")
     with pytest.raises(ValueError):
         executor.execute(forged)
+
+
+def test_allow_settles_risk_reservation_after_success():
+    from safestate_core.controls import InMemoryRiskBudgetStore
+    ledger = InMemoryRiskBudgetStore()
+    assert ledger.reserve("agent-1:mission-1:v1", "agent-1:mission-1:v1:req-gw-1", 2, 5)
+    h = Harness()
+    h.initial = replace(
+        h.initial, risk_reservation_id="agent-1:mission-1:v1:req-gw-1",
+        risk_mission_key="agent-1:mission-1:v1", risk_points=2,
+    )
+    h.decisions.result = h.initial
+    h.gateway = ExecutionGateway(
+        h.decisions, h.approvals, h.executor, h.revalidator,
+        risk_budget_store=ledger,
+    )
+    result = h.gateway.submit(h.req)
+    assert result.outcome == "EXECUTED"
+    assert ledger.reserved("agent-1:mission-1:v1") == 0
+    assert ledger.spent("agent-1:mission-1:v1") == 2
+
+
+def test_executor_failure_releases_risk_reservation():
+    from safestate_core.controls import InMemoryRiskBudgetStore
+    ledger = InMemoryRiskBudgetStore()
+    assert ledger.reserve("agent-1:mission-1:v1", "agent-1:mission-1:v1:req-gw-1", 2, 5)
+    h = Harness()
+    h.initial = replace(
+        h.initial, risk_reservation_id="agent-1:mission-1:v1:req-gw-1",
+        risk_mission_key="agent-1:mission-1:v1", risk_points=2,
+    )
+    h.decisions.result = h.initial
+    h.executor.error = RuntimeError("simulated failure")
+    h.gateway = ExecutionGateway(
+        h.decisions, h.approvals, h.executor, h.revalidator,
+        risk_budget_store=ledger,
+    )
+    result = h.gateway.submit(h.req)
+    assert result.outcome == "BLOCKED"
+    assert result.error_code == "EXECUTOR_FAILED"
+    assert ledger.reserved("agent-1:mission-1:v1") == 0
+    assert ledger.spent("agent-1:mission-1:v1") == 0
+
+
+def test_approved_execution_settles_the_original_reservation():
+    from safestate_core.controls import InMemoryRiskBudgetStore
+    ledger = InMemoryRiskBudgetStore()
+    assert ledger.reserve("agent-1:mission-1:v1", "agent-1:mission-1:v1:req-gw-1", 2, 5)
+    h = Harness(DecisionStatus.REQUIRE_APPROVAL)
+    h.initial = replace(
+        h.initial, risk_reservation_id="agent-1:mission-1:v1:req-gw-1",
+        risk_mission_key="agent-1:mission-1:v1", risk_points=2,
+    )
+    h.decisions.result = h.initial
+    h.approvals = ApprovalService(
+        InMemoryApprovalStore(), lambda: h.now, lambda: "approval-with-risk",
+        risk_budget_store=ledger,
+    )
+    h.gateway = ExecutionGateway(
+        h.decisions, h.approvals, h.executor, h.revalidator,
+        risk_budget_store=ledger,
+    )
+    pending = h.gateway.submit(h.req)
+    assert pending.outcome == "APPROVAL_REQUIRED"
+    h.approvals.approve(pending.approval, "verified-human")
+    result = h.gateway.execute_approved(h.req, pending.approval)
+    assert result.outcome == "EXECUTED"
+    assert ledger.reserved("agent-1:mission-1:v1") == 0
+    assert ledger.spent("agent-1:mission-1:v1") == 2

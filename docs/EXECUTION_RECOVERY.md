@@ -20,13 +20,17 @@ PREPARED -----------------------> RELEASED
 EXECUTING ----------------------> UNKNOWN
 ```
 
-- `PREPARED`: journal entry exists, executor has not been entered. Recovery
-  may release its R8 reservation.
+- `PREPARED`: journal entry exists, executor has not been entered. Recovery first
+  atomically claims `RELEASING`, then releases its R8 reservation.
 - `EXECUTING`: executor may or may not have produced an external side effect.
   Recovery changes it to `UNKNOWN`; it does not retry, settle or release.
 - `EXECUTED`: executor success was durably recorded. Recovery settles R8
   without calling the executor again.
-- `FAILED`: executor failure was durably recorded. Recovery releases R8.
+- `FAILED`: executor failure was durably recorded. Recovery first claims
+  `RELEASING`, then releases R8.
+- `RELEASING` / `SETTLING`: recovery has claimed the accounting operation before
+  touching R8. These intermediate states make retries safe after accounting
+  errors, provided the R8 adapter preserves idempotent reservation operations.
 - `UNKNOWN`: operator reconciliation is required. The reservation remains
   held until evidence establishes the external outcome.
 - `SETTLED` / `RELEASED`: terminal accounting states.
@@ -36,8 +40,8 @@ EXECUTING ----------------------> UNKNOWN
 1. Recovery never invokes an executor.
 2. An uncertain `EXECUTING` record is never automatically retried.
 3. An uncertain record is never automatically settled or released.
-4. Settlement/release uses the original reservation ID and existing
-   idempotent R8 operations.
+4. Recovery claims `RELEASING` or `SETTLING` in the journal before calling R8;
+   settlement/release uses the original reservation ID and idempotent R8 operations.
 5. A journal transition is conditional on its expected prior state.
 6. The local in-memory journal is not durable and cannot recover after a real
    process restart. It exists for deterministic tests and simulation only.

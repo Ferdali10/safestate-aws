@@ -19,6 +19,8 @@ class ExecutionState(str, Enum):
     EXECUTING = "EXECUTING"
     EXECUTED = "EXECUTED"
     FAILED = "FAILED"
+    SETTLING = "SETTLING"
+    RELEASING = "RELEASING"
     SETTLED = "SETTLED"
     RELEASED = "RELEASED"
     UNKNOWN = "UNKNOWN"
@@ -88,12 +90,15 @@ class InMemoryExecutionJournal:
             raise ValueError("updated_at must be timezone-aware")
         allowed = {
             (ExecutionState.PREPARED, ExecutionState.EXECUTING),
-            (ExecutionState.PREPARED, ExecutionState.RELEASED),
+            (ExecutionState.PREPARED, ExecutionState.RELEASING),
+            (ExecutionState.FAILED, ExecutionState.RELEASING),
+            (ExecutionState.RELEASING, ExecutionState.RELEASED),
             (ExecutionState.EXECUTING, ExecutionState.EXECUTED),
             (ExecutionState.EXECUTING, ExecutionState.FAILED),
             (ExecutionState.EXECUTING, ExecutionState.UNKNOWN),
+            (ExecutionState.EXECUTED, ExecutionState.SETTLING),
+            (ExecutionState.SETTLING, ExecutionState.SETTLED),
             (ExecutionState.EXECUTED, ExecutionState.SETTLED),
-            (ExecutionState.FAILED, ExecutionState.RELEASED),
         }
         if (expected, target) not in allowed:
             raise ValueError(f"unsupported execution transition: {expected} -> {target}")
@@ -164,14 +169,15 @@ class ExecutionRecoveryService:
             }:
                 continue
             if record.state is ExecutionState.PREPARED:
-                outcome = self._release(record, ExecutionState.PREPARED)
-                outcomes.append(outcome)
-            elif record.state is ExecutionState.EXECUTED:
-                outcome = self._settle(record)
-                outcomes.append(outcome)
+                outcomes.append(self._claim_and_release(record, ExecutionState.PREPARED))
             elif record.state is ExecutionState.FAILED:
-                outcome = self._release(record, ExecutionState.FAILED)
-                outcomes.append(outcome)
+                outcomes.append(self._claim_and_release(record, ExecutionState.FAILED))
+            elif record.state is ExecutionState.EXECUTED:
+                outcomes.append(self._claim_and_settle(record))
+            elif record.state is ExecutionState.RELEASING:
+                outcomes.append(self._finish_release(record))
+            elif record.state is ExecutionState.SETTLING:
+                outcomes.append(self._finish_settlement(record))
             elif record.state is ExecutionState.EXECUTING:
                 now = self._now()
                 changed = self._journal.transition(
@@ -185,37 +191,87 @@ class ExecutionRecoveryService:
                 ))
         return tuple(outcomes)
 
-    def _release(self, record: ExecutionRecord, expected: ExecutionState) -> RecoveryItem:
+    def _claim_and_release(
+        self, record: ExecutionRecord, expected: ExecutionState
+    ) -> RecoveryItem:
+        # Claim the journal state before touching R8. This prevents a concurrent
+        # gateway from moving PREPARED to EXECUTING while recovery releases budget.
+        claimed = self._journal.transition(
+            record.execution_id, expected, ExecutionState.RELEASING, self._now()
+        )
+        if not claimed:
+            current = self._journal.get(record.execution_id)
+            if current is not None and current.state is ExecutionState.RELEASING:
+                return self._finish_release(current)
+            return RecoveryItem(
+                record.execution_id, record.state, "CONCURRENT_CHANGE",
+                "Execution state changed before recovery could claim the release.",
+            )
+        current = self._journal.get(record.execution_id) or record
+        return self._finish_release(current)
+
+    def _finish_release(self, record: ExecutionRecord) -> RecoveryItem:
         if record.reservation_id is not None:
-            if self._risk_budget is None or self._risk_budget.release(record.reservation_id) is not True:
+            try:
+                released = (
+                    self._risk_budget is not None
+                    and self._risk_budget.release(record.reservation_id) is True
+                )
+            except Exception:  # noqa: BLE001 - leave RELEASING for retry
+                released = False
+            if not released:
                 return RecoveryItem(
                     record.execution_id, record.state, "ACCOUNTING_FAILED",
-                    "Reservation release failed; operator reconciliation is required.",
+                    "Reservation release failed; RELEASING is retained for safe retry.",
                 )
         changed = self._journal.transition(
-            record.execution_id, expected, ExecutionState.RELEASED, self._now()
+            record.execution_id, ExecutionState.RELEASING,
+            ExecutionState.RELEASED, self._now()
         )
         return RecoveryItem(
             record.execution_id, record.state,
             "RELEASED" if changed else "CONCURRENT_CHANGE",
-            "Reservation released for an execution that is confirmed not to have completed.",
+            "Reservation released after the journal claimed RELEASING.",
         )
 
-    def _settle(self, record: ExecutionRecord) -> RecoveryItem:
+    def _claim_and_settle(self, record: ExecutionRecord) -> RecoveryItem:
+        claimed = self._journal.transition(
+            record.execution_id, ExecutionState.EXECUTED,
+            ExecutionState.SETTLING, self._now()
+        )
+        if not claimed:
+            current = self._journal.get(record.execution_id)
+            if current is not None and current.state is ExecutionState.SETTLING:
+                return self._finish_settlement(current)
+            return RecoveryItem(
+                record.execution_id, record.state, "CONCURRENT_CHANGE",
+                "Execution state changed before recovery could claim settlement.",
+            )
+        current = self._journal.get(record.execution_id) or record
+        return self._finish_settlement(current)
+
+    def _finish_settlement(self, record: ExecutionRecord) -> RecoveryItem:
         if record.reservation_id is not None:
-            if self._risk_budget is None or self._risk_budget.settle(record.reservation_id) is not True:
+            try:
+                settled = (
+                    self._risk_budget is not None
+                    and self._risk_budget.settle(record.reservation_id) is True
+                )
+            except Exception:  # noqa: BLE001 - leave SETTLING for retry
+                settled = False
+            if not settled:
                 return RecoveryItem(
                     record.execution_id, record.state, "ACCOUNTING_FAILED",
-                    "Execution is confirmed, but reservation settlement failed; operator reconciliation is required.",
+                    "Reservation settlement failed; SETTLING is retained for safe retry.",
                 )
         changed = self._journal.transition(
-            record.execution_id, ExecutionState.EXECUTED,
+            record.execution_id, ExecutionState.SETTLING,
             ExecutionState.SETTLED, self._now()
         )
         return RecoveryItem(
             record.execution_id, record.state,
             "SETTLED" if changed else "CONCURRENT_CHANGE",
-            "Confirmed execution was settled without invoking the executor again.",
+            "Confirmed execution settled after the journal claimed SETTLING.",
         )
 
     def _now(self) -> datetime:

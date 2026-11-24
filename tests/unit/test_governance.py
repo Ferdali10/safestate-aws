@@ -79,6 +79,9 @@ class BrokenTripwire:
     def trigger(self, *args):
         raise OSError("tripwire unavailable")
 
+    def is_revoked(self, agent_id):
+        return False
+
 
 def make_service(active_mission=None, risk_store=None, tripwires=None, resources=None):
     ids = itertools.count(1)
@@ -221,3 +224,28 @@ def test_r9_handler_failure_is_not_mistaken_for_successful_revocation():
     ).decide_raw(raw_payload(action="DECOY_EXPORT"))
     assert result.status is DecisionStatus.BLOCK
     assert result.reason_code == "TRIPWIRE_HANDLER_FAILED"
+
+
+def test_r9_revoked_agent_is_blocked_on_every_later_request():
+    handler = InMemoryTripwireHandler(lambda: "incident-004", lambda: NOW)
+    service = make_service(
+        mission(decoy_resource_ids=frozenset({"i-decoy-001"})), tripwires=handler
+    )
+    assert service.decide(request(resource_id="i-decoy-001")).reason_code == "TRIPWIRE_TRIGGERED"
+    later = service.decide(request(request_id="req-after"))
+    assert later.status is DecisionStatus.BLOCK
+    assert later.rule_id == "R9"
+    assert later.reason_code == "AGENT_SESSION_REVOKED"
+
+
+def test_r9_revocation_lookup_failure_fails_closed():
+    class BrokenLookup:
+        def trigger(self, *args):
+            pass
+
+        def is_revoked(self, agent_id):
+            raise OSError("revocation store unavailable")
+
+    result = make_service(tripwires=BrokenLookup()).decide(request())
+    assert result.status is DecisionStatus.BLOCK
+    assert result.reason_code == "DECISION_PIPELINE_ERROR"

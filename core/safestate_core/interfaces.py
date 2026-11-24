@@ -92,6 +92,10 @@ class TripwireHandler(Protocol):
         target: str,
     ) -> None: ...
 
+    def is_revoked(self, agent_id: str) -> bool:
+        """Return True once a tripwire has revoked this agent's session."""
+        ...
+
 
 class AuditSink(Protocol):
     """Append-only audit destination. Raising means persistence failed."""

@@ -15,7 +15,7 @@ NOW = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
 
 def request(**changes):
     values = dict(
-        request_id="req-gw-1", agent_id="agent-1", mission_id="mission-1",
+        request_id="agent-1:mission-1:v1:req-gw-1", agent_id="agent-1", mission_id="mission-1",
         mission_version="v1", action=ActionType.DESCRIBE_INSTANCE,
         resource_id="i-dev-001", resource_type=ResourceType.EC2_INSTANCE,
         parameters={}, requested_at=NOW,
@@ -207,11 +207,11 @@ def test_simulator_rejects_unknown_action_even_if_constructed_unsafely():
 def test_allow_settles_risk_reservation_after_success():
     from safestate_core.controls import InMemoryRiskBudgetStore
     ledger = InMemoryRiskBudgetStore()
-    assert ledger.reserve("agent:mission:v1", "req-gw-1", 2, 5)
+    assert ledger.reserve("agent-1:mission-1:v1", "agent-1:mission-1:v1:req-gw-1", 2, 5)
     h = Harness()
     h.initial = replace(
-        h.initial, risk_reservation_id="req-gw-1",
-        risk_mission_key="agent:mission:v1", risk_points=2,
+        h.initial, risk_reservation_id="agent-1:mission-1:v1:req-gw-1",
+        risk_mission_key="agent-1:mission-1:v1", risk_points=2,
     )
     h.decisions.result = h.initial
     h.gateway = ExecutionGateway(
@@ -220,18 +220,18 @@ def test_allow_settles_risk_reservation_after_success():
     )
     result = h.gateway.submit(h.req)
     assert result.outcome == "EXECUTED"
-    assert ledger.reserved("agent:mission:v1") == 0
-    assert ledger.spent("agent:mission:v1") == 2
+    assert ledger.reserved("agent-1:mission-1:v1") == 0
+    assert ledger.spent("agent-1:mission-1:v1") == 2
 
 
 def test_executor_failure_releases_risk_reservation():
     from safestate_core.controls import InMemoryRiskBudgetStore
     ledger = InMemoryRiskBudgetStore()
-    assert ledger.reserve("agent:mission:v1", "req-gw-1", 2, 5)
+    assert ledger.reserve("agent-1:mission-1:v1", "agent-1:mission-1:v1:req-gw-1", 2, 5)
     h = Harness()
     h.initial = replace(
-        h.initial, risk_reservation_id="req-gw-1",
-        risk_mission_key="agent:mission:v1", risk_points=2,
+        h.initial, risk_reservation_id="agent-1:mission-1:v1:req-gw-1",
+        risk_mission_key="agent-1:mission-1:v1", risk_points=2,
     )
     h.decisions.result = h.initial
     h.executor.error = RuntimeError("simulated failure")
@@ -242,18 +242,18 @@ def test_executor_failure_releases_risk_reservation():
     result = h.gateway.submit(h.req)
     assert result.outcome == "BLOCKED"
     assert result.error_code == "EXECUTOR_FAILED"
-    assert ledger.reserved("agent:mission:v1") == 0
-    assert ledger.spent("agent:mission:v1") == 0
+    assert ledger.reserved("agent-1:mission-1:v1") == 0
+    assert ledger.spent("agent-1:mission-1:v1") == 0
 
 
 def test_approved_execution_settles_the_original_reservation():
     from safestate_core.controls import InMemoryRiskBudgetStore
     ledger = InMemoryRiskBudgetStore()
-    assert ledger.reserve("agent:mission:v1", "req-gw-1", 2, 5)
+    assert ledger.reserve("agent-1:mission-1:v1", "agent-1:mission-1:v1:req-gw-1", 2, 5)
     h = Harness(DecisionStatus.REQUIRE_APPROVAL)
     h.initial = replace(
-        h.initial, risk_reservation_id="req-gw-1",
-        risk_mission_key="agent:mission:v1", risk_points=2,
+        h.initial, risk_reservation_id="agent-1:mission-1:v1:req-gw-1",
+        risk_mission_key="agent-1:mission-1:v1", risk_points=2,
     )
     h.decisions.result = h.initial
     h.approvals = ApprovalService(
@@ -269,5 +269,5 @@ def test_approved_execution_settles_the_original_reservation():
     h.approvals.approve(pending.approval, "verified-human")
     result = h.gateway.execute_approved(h.req, pending.approval)
     assert result.outcome == "EXECUTED"
-    assert ledger.reserved("agent:mission:v1") == 0
-    assert ledger.spent("agent:mission:v1") == 2
+    assert ledger.reserved("agent-1:mission-1:v1") == 0
+    assert ledger.spent("agent-1:mission-1:v1") == 2

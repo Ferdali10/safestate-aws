@@ -252,7 +252,7 @@ class DefaultDecisionService:
                     )
                 decision = replace(
                     decision,
-                    risk_reservation_id=request.request_id,
+                    risk_reservation_id=reservation_id,
                     risk_mission_key=mission_key,
                     risk_points=points,
                 )

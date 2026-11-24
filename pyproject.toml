@@ -12,5 +12,5 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["core"]
+pythonpath = ["core", "examples"]
 addopts = "-ra"

@@ -212,3 +212,47 @@ def test_unknown_actions_are_labelled_by_the_rule_they_violate(raw, rule):
 
 def test_destructive_label_wins_over_exfiltration_label():
     assert classify_unknown_action("DELETE_S3_OBJECT")[0] == "R4"
+
+
+COST = dict(action="GET_COST_AND_UTILIZATION", resource_id="*", resource_type="COST_REPORT")
+LIST = dict(action="LIST_INSTANCES", resource_id="*", resource_type="EC2_INSTANCE")
+
+
+@pytest.mark.parametrize("bad", [0, -5, 1001, 10**12, True, "10", 1.5, None])
+def test_max_results_must_be_a_bounded_integer(bad):
+    reject("INVALID_PARAMETER_VALUE", **LIST, parameters={"max_results": bad})
+
+
+@pytest.mark.parametrize("good", [1, 50, 1000])
+def test_max_results_accepts_bounded_integers(good):
+    assert parse_request(payload(**LIST, parameters={"max_results": good})).parameters == {
+        "max_results": good
+    }
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"start_date": "not-a-date", "end_date": "2026-01-02"},
+        {"start_date": "2026-13-01", "end_date": "2026-01-02"},
+        {"start_date": "20260101", "end_date": "2026-01-02"},
+        {"start_date": "2026-02-01", "end_date": "2026-01-01"},
+        {"start_date": "2024-01-01", "end_date": "2026-01-01"},
+        {"start_date": "2026-01-01"},
+        {"end_date": "2026-01-01"},
+        {"start_date": "2026-01-01", "end_date": "2026-01-02", "granularity": "WEEKLY;x"},
+        {"granularity": "hourly"},
+    ],
+)
+def test_cost_parameters_are_checked(params):
+    reject("INVALID_PARAMETER_VALUE", **COST, parameters=params)
+
+
+def test_valid_cost_parameters_are_accepted():
+    params = {"start_date": "2026-10-01", "end_date": "2026-10-31", "granularity": "DAILY"}
+    assert parse_request(payload(**COST, parameters=params)).parameters == params
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "x" * 201, "line\nbreak", "tab\there", "nul\x00", 5])
+def test_stop_reason_must_be_short_printable_text(bad):
+    reject("INVALID_PARAMETER_VALUE", parameters={"reason": bad})

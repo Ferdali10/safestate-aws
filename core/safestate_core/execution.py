@@ -28,6 +28,18 @@ class Executor(Protocol):
     def execute(self, request: ActionRequest) -> Mapping[str, Any]: ...
 
 
+class ApprovalNotifier(Protocol):
+    """Delivers the approval secret to the human approval channel only.
+
+    The secret must never travel back to the agent that made the request.
+    Raising means delivery failed; the gateway then cancels the approval.
+    """
+
+    def deliver(
+        self, credential: ApprovalCredential, request: ActionRequest, decision: Decision
+    ) -> None: ...
+
+
 class DecisionRevalidator(Protocol):
     """Fresh, trusted policy/context check before an approved mutation executes.
 
@@ -46,6 +58,8 @@ class GatewayResult:
     execution: Mapping[str, Any] | None = None
     approval: ApprovalCredential | None = None
     error_code: str | None = None
+    # Non-secret handle the agent may quote when asking a human to decide.
+    approval_id: str | None = None
 
 
 class ExecutionGateway:
@@ -60,7 +74,13 @@ class ExecutionGateway:
         risk_budget_store=None,
         execution_journal: ExecutionJournal | None = None,
         clock=None,
+        approval_notifier: ApprovalNotifier | None = None,
+        expose_approval_credential: bool = False,
     ) -> None:
+        self._notifier = approval_notifier
+        # Test/demo escape hatch: returns the secret to the caller. Never enable
+        # it on a path the agent can reach, or the agent can approve itself.
+        self._expose_credential = expose_approval_credential
         self._decisions = decision_service
         self._approvals = approval_service
         self._executor = executor
@@ -71,6 +91,10 @@ class ExecutionGateway:
 
     def submit(self, request: ActionRequest) -> GatewayResult:
         """Evaluate a request; execute ALLOW, or issue a pending approval."""
+        try:  # free budget held by expired approvals; a sweep failure must not block
+            self._approvals.expire_stale()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             decision = self._decisions.decide(request)
         except Exception:  # noqa: BLE001 - decision service faults fail closed
@@ -87,9 +111,21 @@ class ExecutionGateway:
             try:
                 credential = self._approvals.issue(request, decision)
             except Exception:  # noqa: BLE001 - no approval, no execution
+                self._release_quietly(decision.risk_reservation_id)
                 return self._blocked_result(decision, "APPROVAL_ISSUE_FAILED")
+            if self._notifier is None and not self._expose_credential:
+                self._cancel_approval(credential)
+                return self._blocked_result(decision, "APPROVAL_CHANNEL_UNAVAILABLE")
+            if self._notifier is not None:
+                try:
+                    self._notifier.deliver(credential, request, decision)
+                except Exception:  # noqa: BLE001 - undelivered approval is unusable
+                    self._cancel_approval(credential)
+                    return self._blocked_result(decision, "APPROVAL_DELIVERY_FAILED")
             return GatewayResult(
-                outcome="APPROVAL_REQUIRED", decision=decision, approval=credential
+                outcome="APPROVAL_REQUIRED", decision=decision,
+                approval=credential if self._expose_credential else None,
+                approval_id=credential.approval_id,
             )
         return self._execute_after_allow(request, decision)
 
@@ -130,6 +166,21 @@ class ExecutionGateway:
         return self._execute_after_allow(
             request, fresh, reservation_id=approval_record.risk_reservation_id
         )
+
+    def _cancel_approval(self, credential: ApprovalCredential) -> None:
+        """Reject an approval nobody can reach, releasing its reservation."""
+        try:
+            self._approvals.reject(credential, "safestate-gateway")
+        except Exception:  # noqa: BLE001 - the stale sweep retries the release
+            pass
+
+    def _release_quietly(self, reservation_id: str | None) -> None:
+        if reservation_id is None or self._risk_budget is None:
+            return
+        try:
+            self._risk_budget.release(reservation_id)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _execute_after_allow(
         self, request: ActionRequest, decision: Decision,

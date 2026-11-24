@@ -91,7 +91,8 @@ class Harness:
         self.revalidator = FakeRevalidator(self.fresh)
         self.executor = FakeExecutor()
         self.gateway = ExecutionGateway(
-            self.decisions, self.approvals, self.executor, self.revalidator
+            self.decisions, self.approvals, self.executor, self.revalidator,
+            expose_approval_credential=True,
         )
 
 
@@ -216,7 +217,7 @@ def test_allow_settles_risk_reservation_after_success():
     h.decisions.result = h.initial
     h.gateway = ExecutionGateway(
         h.decisions, h.approvals, h.executor, h.revalidator,
-        risk_budget_store=ledger,
+        risk_budget_store=ledger, expose_approval_credential=True,
     )
     result = h.gateway.submit(h.req)
     assert result.outcome == "EXECUTED"
@@ -237,7 +238,7 @@ def test_executor_failure_releases_risk_reservation():
     h.executor.error = RuntimeError("simulated failure")
     h.gateway = ExecutionGateway(
         h.decisions, h.approvals, h.executor, h.revalidator,
-        risk_budget_store=ledger,
+        risk_budget_store=ledger, expose_approval_credential=True,
     )
     result = h.gateway.submit(h.req)
     assert result.outcome == "BLOCKED"
@@ -262,7 +263,7 @@ def test_approved_execution_settles_the_original_reservation():
     )
     h.gateway = ExecutionGateway(
         h.decisions, h.approvals, h.executor, h.revalidator,
-        risk_budget_store=ledger,
+        risk_budget_store=ledger, expose_approval_credential=True,
     )
     pending = h.gateway.submit(h.req)
     assert pending.outcome == "APPROVAL_REQUIRED"

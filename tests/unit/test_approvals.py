@@ -249,6 +249,8 @@ def test_issue_failure_releases_reserved_budget():
             raise RuntimeError("disk unavailable")
         def get(self, approval_id):
             return None
+        def list_open(self):
+            return []
         def transition(self, approval_id, expected, updated):
             return False
     ledger = InMemoryRiskBudgetStore()

@@ -17,6 +17,11 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .models import Decision, DecisionStatus
 
+try:  # POSIX advisory lock so several processes can append to one journal safely
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
+
 GENESIS_HASH = "0" * 64
 SCHEMA_VERSION = 1
 _HASH_FIELDS = (
@@ -94,12 +99,44 @@ def _event_hash(record: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(record)).hexdigest()
 
 
+class _ExclusiveFileLock:
+    """Cross-process exclusive lock held for the duration of one append."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._handle = None
+
+    def __enter__(self) -> "_ExclusiveFileLock":
+        if fcntl is None:  # pragma: no cover - the in-process lock still applies
+            return self
+        self._handle = open(self._path, "a+b")
+        fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        if self._handle is not None:
+            try:
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._handle.close()
+                self._handle = None
+
+
 class JsonlAuditSink:
-    """Append-only JSONL writer with a SHA-256 hash chain and process lock."""
+    """Append-only JSONL writer with a SHA-256 hash chain.
+
+    Appends are serialized across threads (a lock) and across processes or sink
+    instances sharing the file (an exclusive flock on a sidecar .lock file), so
+    concurrent writers extend one chain instead of forking it. The full journal
+    is verified on the first append of each sink instance; later appends read
+    and check only the last record, so cost does not grow with journal size.
+    Call verify() periodically to re-check the whole chain.
+    """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
+        self._verified = False
 
     def append(self, record: Mapping[str, Any]) -> None:
         required = (
@@ -121,18 +158,17 @@ class JsonlAuditSink:
         payload["schema_version"] = SCHEMA_VERSION
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock:
+        with self._lock, self._file_lock():
             previous_hash = GENESIS_HASH
             if self.path.exists() and self.path.stat().st_size:
-                result = self.verify()
-                if not result.valid:
-                    raise ValueError(
-                        f"existing audit journal is invalid: {result.error}"
-                    )
-                with self.path.open("rb") as source:
-                    for line in source:
-                        if line.strip():
-                            previous_hash = json.loads(line)["event_hash"]
+                if not self._verified:
+                    result = self.verify()
+                    if not result.valid:
+                        raise ValueError(
+                            f"existing audit journal is invalid: {result.error}"
+                        )
+                    self._verified = True
+                previous_hash = self._last_valid_hash()
             payload["previous_hash"] = previous_hash
             payload["event_hash"] = _event_hash(payload)
             encoded = json.dumps(
@@ -142,6 +178,30 @@ class JsonlAuditSink:
                 target.write(encoded + "\n")
                 target.flush()
                 os.fsync(target.fileno())
+
+    def _file_lock(self):
+        return _ExclusiveFileLock(self.path.with_name(self.path.name + ".lock"))
+
+    def _last_valid_hash(self) -> str:
+        """Read the final record and check that it is complete and self-consistent."""
+        with self.path.open("rb") as source:
+            source.seek(0, os.SEEK_END)
+            size = source.tell()
+            window = min(size, 65536)
+            source.seek(size - window)
+            tail = source.read()
+        if not tail.endswith(b"\n"):
+            raise ValueError("existing audit journal is invalid: incomplete final record")
+        lines = tail.splitlines()
+        if len(lines) == 1 and window < size:
+            raise ValueError("existing audit journal is invalid: oversized record")
+        try:
+            record = json.loads(lines[-1])
+            if record.get("event_hash") != _event_hash(record):
+                raise ValueError("event hash mismatch")
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"existing audit journal is invalid: {exc}") from exc
+        return record["event_hash"]
 
     def verify(self) -> VerificationResult:
         """Verify every record, hash, schema and chain link in the journal."""

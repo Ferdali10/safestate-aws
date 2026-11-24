@@ -7,7 +7,9 @@ than ignored or mapped onto something similar.
 from __future__ import annotations
 
 import math
-from datetime import datetime
+import re
+import unicodedata
+from datetime import date, datetime
 from typing import Any, Mapping
 
 from .actions import (
@@ -153,6 +155,59 @@ def validate_request(request: ActionRequest) -> None:
             f"unsupported parameters for {action.value}: {sorted(map(str, unsupported))}",
         )
     _check_json(request.parameters, "parameters")
+    _check_parameter_values(action, request.parameters)
+
+
+MAX_RESULTS_LIMIT = 1000
+MAX_REASON_LENGTH = 200
+MAX_DATE_RANGE_DAYS = 366
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_GRANULARITIES = frozenset({"DAILY", "MONTHLY"})
+
+
+def _bad_value(name: str, why: str) -> ValidationError:
+    return ValidationError("INVALID_PARAMETER_VALUE", f"parameter {name} {why}")
+
+
+def _parse_date_parameter(name: str, value: object) -> date:
+    if not isinstance(value, str) or not _DATE_PATTERN.match(value):
+        raise _bad_value(name, "must be a YYYY-MM-DD date")
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise _bad_value(name, "is not a real calendar date") from None
+
+
+def _check_parameter_values(action: ActionType, parameters: Mapping[str, Any]) -> None:
+    """Bound every allowed parameter so an executor never receives free-form input."""
+    if "max_results" in parameters:
+        value = parameters["max_results"]
+        if isinstance(value, bool) or not isinstance(value, int) or not (
+            1 <= value <= MAX_RESULTS_LIMIT
+        ):
+            raise _bad_value("max_results", f"must be an integer from 1 to {MAX_RESULTS_LIMIT}")
+    if "granularity" in parameters and parameters["granularity"] not in _GRANULARITIES:
+        raise _bad_value("granularity", "must be DAILY or MONTHLY")
+    if "start_date" in parameters or "end_date" in parameters:
+        if "start_date" not in parameters or "end_date" not in parameters:
+            raise _bad_value("start_date/end_date", "must be provided together")
+        start = _parse_date_parameter("start_date", parameters["start_date"])
+        end = _parse_date_parameter("end_date", parameters["end_date"])
+        if end < start:
+            raise _bad_value("end_date", "must not be before start_date")
+        if (end - start).days > MAX_DATE_RANGE_DAYS:
+            raise _bad_value("end_date", f"range must not exceed {MAX_DATE_RANGE_DAYS} days")
+    if "reason" in parameters:
+        value = parameters["reason"]
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > MAX_REASON_LENGTH
+            or any(unicodedata.category(char).startswith("C") for char in value)
+        ):
+            raise _bad_value(
+                "reason", f"must be 1-{MAX_REASON_LENGTH} printable characters"
+            )
 
 
 def _parse_timestamp(value: object) -> datetime:

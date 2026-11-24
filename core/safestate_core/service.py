@@ -159,6 +159,14 @@ class DefaultDecisionService:
                     "The request does not match the active trusted mission.",
                 )
 
+            if self._tripwires is not None and self._tripwires.is_revoked(
+                request.agent_id
+            ):
+                return self._blocked(
+                    request_id, "R9", "AGENT_SESSION_REVOKED",
+                    "A tripwire revoked this agent session; every request is blocked.",
+                )
+
             if mission.risk_budget is not None and "R8" not in mission.policy_ids:
                 return self._blocked(
                     request_id, "R7", "POLICY_SET_INCOMPLETE",

@@ -103,18 +103,19 @@ def test_r8_reserves_points_for_permitted_action():
     store = InMemoryRiskBudgetStore()
     result = make_service(mission(risk_budget=2), risk_store=store).decide(request())
     assert result.status is DecisionStatus.ALLOW
-    assert store.spent("cost-agent:cost-analysis:1.0") == 1
+    assert store.reserved("cost-agent:cost-analysis:1.0") == 1
+    assert store.spent("cost-agent:cost-analysis:1.0") == 0
 
 
-def test_r8_exhausted_budget_requires_human_approval():
+def test_r8_exhausted_budget_is_a_hard_block_not_an_approval_override():
     store = InMemoryRiskBudgetStore()
     service = make_service(mission(risk_budget=1), risk_store=store)
     assert service.decide(request(request_id="req-1")).status is DecisionStatus.ALLOW
     result = service.decide(request(request_id="req-2"))
-    assert result.status is DecisionStatus.REQUIRE_APPROVAL
+    assert result.status is DecisionStatus.BLOCK
     assert result.rule_id == "R8"
     assert result.reason_code == "RISK_BUDGET_EXCEEDED"
-    assert result.approval_required is True
+    assert result.approval_required is False
 
 
 def test_r8_missing_store_fails_closed_when_budget_is_configured():

@@ -15,7 +15,7 @@ NOW = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
 
 def request(**changes):
     values = dict(
-        request_id="agent-1:mission-1:v1:req-gw-1", agent_id="agent-1", mission_id="mission-1",
+        request_id="req-gw-1", agent_id="agent-1", mission_id="mission-1",
         mission_version="v1", action=ActionType.DESCRIBE_INSTANCE,
         resource_id="i-dev-001", resource_type=ResourceType.EC2_INSTANCE,
         parameters={}, requested_at=NOW,

@@ -1,6 +1,6 @@
 # SafeState AWS Core Contract
 
-**Status:** Implemented local core contract; AWS adapters and approval lifecycle remain unimplemented  
+**Status:** Local core, audit journal, R8 reservation lifecycle, approval workflow and simulated execution gateway implemented; AWS adapters remain unimplemented  
 **Scope:** Sprint 1, Task 01 (domain model and public interfaces)  
 **Decision authority:** Deterministic SafeState Core; never the LLM
 
@@ -203,7 +203,7 @@ This layout is proposed for Task 01. Existing repository content must be preserv
 
 The domain model and public interfaces include R8 and R9. Their local deterministic enforcement is implemented in `service.py`, with in-memory simulation adapters in `controls.py`. Cloud persistence and real AgentCore session revocation remain future adapters.
 
-- **R8 — Risk budget.** Each `ActionType` has an operator-configured point cost, and each mission has a point budget. When the remaining budget cannot cover a requested action, the decision is `REQUIRE_APPROVAL`. Spent points are tracked per mission with an atomic counter so concurrent requests cannot overspend. Point values are configuration, not a measure of real-world impact.
+- **R8 — Risk budget.** Each `ActionType` has an operator-configured point cost, and each mission has a hard point budget. The DecisionService creates an idempotent reservation keyed by mission version and request ID. Reserved points reduce availability but are not counted as spent. Successful execution settles the reservation; rejection, expiry, or executor failure releases it. If the hard cap cannot cover the request, the decision is `BLOCK`; human approval cannot override the cap. The included local ledger is thread-safe within one process; production requires durable transactional conditional writes. Point values are configuration, not a measure of real-world impact.
 - **R9 — Tripwires.** A mission may declare decoy tools and decoy resources that no legitimate task uses. A request that targets a decoy results in `BLOCK`, revokes the agent session and writes an incident record containing the triggering request.
 
-Both rules are deterministic, fail closed, and covered by unit tests. R8 reservations are consumed at decision time in the current MVP, even if a human approval is later rejected or expires; this must be replaced by explicit reservation lifecycle semantics before production. R9's in-memory handler demonstrates incident recording and local session revocation only; a production adapter must revoke the real agent session and persist incidents durably. Neither rule may turn an otherwise blocked request into an allowed one.
+Both rules are deterministic, fail closed, and covered by unit tests. R8 has explicit RESERVED -> SETTLED / RELEASED transitions and emits events through the existing AuditSink when configured. Production still needs a durable ledger, expiry sweeper, and reconciliation for uncertain external execution outcomes. R9's in-memory handler demonstrates incident recording and local session revocation only; a production adapter must revoke the real agent session and persist incidents durably. Neither rule may turn an otherwise blocked request into an allowed one.

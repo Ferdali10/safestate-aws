@@ -129,3 +129,53 @@ def test_execution_journal_rejects_unsupported_state_transition():
         journal.transition(
             "exec-1", ExecutionState.PREPARED, ExecutionState.SETTLED, NOW
         )
+
+
+
+def test_recovery_claims_release_before_touching_risk_ledger():
+    journal = InMemoryExecutionJournal()
+    journal.prepare(record())
+
+    class InspectingLedger:
+        def release(self, reservation_id):
+            assert journal.get("exec-1").state is ExecutionState.RELEASING
+            return True
+
+    result = ExecutionRecoveryService(journal, InspectingLedger(), lambda: NOW).recover()
+    assert result[0].outcome == "RELEASED"
+    assert journal.get("exec-1").state is ExecutionState.RELEASED
+
+
+def test_recovery_retries_release_from_releasing_after_accounting_error():
+    journal = InMemoryExecutionJournal()
+    journal.prepare(record())
+    class FlakyLedger:
+        calls = 0
+        def release(self, reservation_id):
+            self.calls += 1
+            return self.calls > 1
+
+    ledger = FlakyLedger()
+    service = ExecutionRecoveryService(journal, ledger, lambda: NOW)
+    first = service.recover()
+    assert first[0].outcome == "ACCOUNTING_FAILED"
+    assert journal.get("exec-1").state is ExecutionState.RELEASING
+    second = service.recover()
+    assert second[0].outcome == "RELEASED"
+    assert journal.get("exec-1").state is ExecutionState.RELEASED
+
+
+def test_recovery_claims_settlement_before_touching_risk_ledger():
+    journal = InMemoryExecutionJournal()
+    journal.prepare(record())
+    assert journal.transition("exec-1", ExecutionState.PREPARED, ExecutionState.EXECUTING, NOW)
+    assert journal.transition("exec-1", ExecutionState.EXECUTING, ExecutionState.EXECUTED, NOW)
+
+    class InspectingLedger:
+        def settle(self, reservation_id):
+            assert journal.get("exec-1").state is ExecutionState.SETTLING
+            return True
+
+    result = ExecutionRecoveryService(journal, InspectingLedger(), lambda: NOW).recover()
+    assert result[0].outcome == "SETTLED"
+    assert journal.get("exec-1").state is ExecutionState.SETTLED

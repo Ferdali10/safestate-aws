@@ -104,12 +104,22 @@ class ExecutionGateway:
         if fresh.status is DecisionStatus.BLOCK:
             return self._blocked_result(fresh, "POLICY_BLOCKED_ON_REVALIDATION")
         try:
-            self._approvals.consume(credential, request)
+            reservation_id = self._approvals.reservation_id_for(credential)
         except ApprovalError:
             return self._blocked_result(fresh, "APPROVAL_INVALID_OR_CONSUMED")
         except Exception:  # noqa: BLE001 - store failures fail closed
             return self._blocked_result(fresh, "APPROVAL_STORE_FAILED")
-        return self._execute_after_allow(request, fresh)
+        if reservation_id is not None and self._risk_budget is None:
+            return self._blocked_result(fresh, "RISK_LEDGER_UNAVAILABLE")
+        try:
+            approval_record = self._approvals.consume(credential, request)
+        except ApprovalError:
+            return self._blocked_result(fresh, "APPROVAL_INVALID_OR_CONSUMED")
+        except Exception:  # noqa: BLE001 - store failures fail closed
+            return self._blocked_result(fresh, "APPROVAL_STORE_FAILED")
+        return self._execute_after_allow(
+            request, fresh, reservation_id=approval_record.risk_reservation_id
+        )
 
     def _execute_after_allow(
         self, request: ActionRequest, decision: Decision,

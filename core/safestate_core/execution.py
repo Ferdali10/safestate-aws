@@ -223,16 +223,28 @@ class ExecutionGateway:
                 marked = False
             if marked is not True:
                 return self._blocked_result(decision, "EXECUTION_FAILURE_JOURNAL_FAILED")
+            # Claim RELEASING in the journal before touching R8, exactly as the
+            # recovery service does, so the two paths cannot release concurrently.
+            try:
+                claimed_release = journal.transition(
+                    execution_id, ExecutionState.FAILED,
+                    ExecutionState.RELEASING, self._now(),
+                )
+            except Exception:  # noqa: BLE001
+                claimed_release = False
+            if claimed_release is not True:
+                return self._blocked_result(decision, "EXECUTION_FAILURE_JOURNAL_FAILED")
             if reservation_id is not None:
                 try:
                     released = self._risk_budget.release(reservation_id)
                 except Exception:  # noqa: BLE001
                     released = False
                 if released is not True:
+                    # RELEASING is retained; recovery retries the release safely.
                     return self._blocked_result(decision, "EXECUTOR_FAILED_RISK_RELEASE_FAILED")
             try:
                 finalized = journal.transition(
-                    execution_id, ExecutionState.FAILED,
+                    execution_id, ExecutionState.RELEASING,
                     ExecutionState.RELEASED, self._now(),
                 )
             except Exception:  # noqa: BLE001

@@ -73,6 +73,8 @@ class RiskBudgetStore(Protocol):
 
     def reserved(self, mission_key: str) -> int: ...
 
+    def reservation(self, reservation_id: str) -> Any | None: ...
+
 
 class TripwireHandler(Protocol):
     """Record a decoy incident and revoke the affected agent session.

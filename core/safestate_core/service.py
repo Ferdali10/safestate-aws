@@ -233,9 +233,10 @@ class DefaultDecisionService:
                         "No risk cost is configured for this action.",
                     )
                 mission_key = f"{mission.agent_id}:{mission.mission_id}:{mission.version}"
+                reservation_id = f"{mission_key}:{request.request_id}"
                 try:
                     reserved = self._risk_budget.reserve(
-                        mission_key, request.request_id, points, mission.risk_budget
+                        mission_key, reservation_id, points, mission.risk_budget
                     )
                     if not isinstance(reserved, bool):
                         raise TypeError("risk budget reserve must return bool")

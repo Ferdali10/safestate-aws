@@ -64,7 +64,7 @@ The agent runs on the **Amazon Bedrock AgentCore managed harness** (Bedrock Agen
 | R5 | No data exfiltration: no S3 object-content reads, snapshot sharing, IAM changes, or tools that send protected data outside the approved workflow. | `BLOCK` |
 | R6 | Anything outside the mission is refused. Resource metadata (tags, names, logs) is untrusted data, never an instruction source. | `BLOCK` |
 | R7 | If the decision or approval service is unavailable, execution fails closed. | `BLOCK` |
-| R8 | **Risk budget.** Each action has a point cost and each mission has a limited budget. When the budget is spent, further actions require a human decision. | `REQUIRE_APPROVAL` |
+| R8 | **Risk budget.** Each action has a point cost and each mission has a hard point cap. Points are reserved, then settled after successful execution or released on rejection, expiry or execution failure. A hard budget shortage is never overridden by human approval. | `BLOCK` when no reservation is available |
 | R9 | **Tripwires.** Decoy tools and decoy resources that no legitimate mission uses. Touching one is treated as evidence of hijacking: the session is revoked and an incident record is written. | `BLOCK` + lockdown |
 
 **Edge cases**
@@ -77,7 +77,7 @@ The agent runs on the **Amazon Bedrock AgentCore managed harness** (Bedrock Agen
 
 ### How the risk budget works
 
-Every action type has an operator-configurable point cost. The local defaults are 1 point for metadata reads, 1 for cost/utilization queries and 20 for a stop request. A mission starts with a fixed budget. The engine reserves points atomically per mission version, so concurrent requests cannot overspend. When the remaining budget cannot cover an action, the decision becomes `REQUIRE_APPROVAL`. In this MVP, points are consumed when a non-BLOCK decision is issued, including requests awaiting approval; rejected or expired approvals are not refunded. This conservative accounting limitation is documented and must be replaced by reservation/settlement semantics before production use. The point values are configuration, not a claim about real-world risk.
+Every action type has an operator-configurable point cost. The local defaults are 1 point for metadata reads, 1 for cost/utilization queries and 20 for a stop request. A mission starts with a fixed budget. The engine reserves points atomically per mission version and validated request ID, so concurrent requests cannot overspend. Reserved points are not counted as spent. Successful execution settles the reservation; rejection, expiry or executor failure releases it. If the hard budget cap cannot cover an action, the decision is `BLOCK`; human approval cannot override the mission limit. The local adapter is process-local and must be replaced by a durable transactional store before production use. The point values are configuration, not a claim about real-world risk.
 
 ### How tripwires work
 
@@ -92,7 +92,7 @@ Prompt instructions alone are not treated as a security boundary. Each rule is b
 | 1. Input/output safeguards | Amazon Bedrock Guardrails (prompt-attack and content policies), attached to the agent | R6 (defense in depth only) |
 | 2. Restricted tool surface | AgentCore Gateway exposes approved read tools, one `request_stop_instance` operation and the decoys. No delete, terminate, IAM mutation or shell tool exists. | R1, R4, R5, R9 |
 | 3. SafeState Decision Engine | Deterministic policy evaluation in AWS Lambda. No LLM makes the authorization decision. | R1–R9 |
-| 4. Risk budget | Cumulative point accounting per mission with an atomic counter in Amazon DynamoDB | R8 |
+| 4. Risk budget | Request-bound reservations, settlement and release; local in-memory adapter today, durable conditional writes required for AWS | R8 |
 | 5. Tripwire monitor | Detects calls that target decoys and triggers lockdown | R9 |
 | 6. Human approval | Expiring, single-use approval bound to the exact action, resource and request identifier | R3, R8 |
 | 7. IAM execution boundary | The agent-facing integration has no EC2 write permissions. A separate executor uses a narrowly scoped IAM role with resource-tag conditions where supported. The agent role cannot assume it. | R2, R3, R4 |
@@ -214,7 +214,7 @@ safestate-aws/
 └── README.md
 ```
 
-The local deterministic core, audit journal and R8/R9 simulation adapters are implemented. AWS adapters, approval workflow, executor and infrastructure are intentionally not part of this local-only stage. See [R8/R9 controls](docs/R8_R9_CONTROLS.md).
+The local deterministic core, audit journal, R8 reservation lifecycle, R9 simulation, request-bound human approval workflow and simulated execution gateway are implemented. AWS adapters, durable approval/risk stores, real IAM executor integration and infrastructure are not yet implemented. See [R8/R9 controls](docs/R8_R9_CONTROLS.md).
 
 ## 11. Project status
 
@@ -222,13 +222,13 @@ The local deterministic core, audit journal and R8/R9 simulation adapters are im
 |------|--------|
 | Product vision and MVP scope | Defined |
 | Mission rules R1–R7 | Implemented in local deterministic core; CI verified |
-| R8 risk budget | Implemented with atomic in-memory store and fail-closed behavior; AWS persistence not implemented |
+| R8 risk budget | Implemented with request-bound reserve/settle/release lifecycle, audit events and concurrent local tests; durable AWS persistence not implemented |
 | R9 tripwires | Implemented with decoy detection and in-memory incident/session revocation adapter; real AgentCore revocation not implemented |
 | DecisionService | Implemented; validates requests and trusted context before policy evaluation |
 | Audit journal | Local JSONL + SHA-256 hash chain; external durable storage not implemented |
 | AgentCore agent and Gateway integration | Not implemented |
-| Human approval workflow | Not implemented |
-| AWS executor and IAM boundary | Not implemented |
+| Human approval workflow | Implemented locally: request-bound, expiring, single-use token; external identity provider and durable store pending |
+| Execution Gateway | Implemented locally with fail-closed routing and simulated AWS executor; real AWS executor and IAM adapter pending |
 | Adversarial tests A1–A10 | Planned; results pending |
 | End-to-end demo and screenshots | Pending |
 

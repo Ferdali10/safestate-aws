@@ -19,7 +19,7 @@ NOW = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
 
 def request(**changes):
     values = dict(
-        request_id="agent-1:mission-1:v1:req-1", agent_id="agent-1", mission_id="mission-1",
+        request_id="req-1", agent_id="agent-1", mission_id="mission-1",
         mission_version="v1", action=ActionType.REQUEST_STOP_INSTANCE,
         resource_id="i-dev-1", resource_type=ResourceType.EC2_INSTANCE,
         parameters={"region": "eu-central-1", "dry_run": False},
@@ -31,7 +31,7 @@ def request(**changes):
 
 def decision(**changes):
     values = dict(
-        decision_id="dec-1", request_id="agent-1:mission-1:v1:req-1",
+        decision_id="dec-1", request_id="req-1",
         status=DecisionStatus.REQUIRE_APPROVAL, rule_id="R3",
         reason_code="STOP_REQUIRES_HUMAN_APPROVAL", reason="Human approval required.",
         policy_version="test-v1", evaluated_at=NOW, approval_required=True,

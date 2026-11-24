@@ -127,8 +127,14 @@ class ApprovalService:
             or decision.request_id != request.request_id
         ):
             raise ApprovalError("decision does not authorize an approval workflow")
-        if decision.risk_reservation_id is not None and self._risk_budget is None:
-            raise ApprovalError("risk budget ledger is required for reserved approvals")
+        if decision.risk_reservation_id is not None:
+            if self._risk_budget is None:
+                raise ApprovalError("risk budget ledger is required for reserved approvals")
+            self._assert_reservation_active(
+                decision.risk_reservation_id,
+                decision.risk_mission_key,
+                decision.risk_points,
+            )
         now = self._now()
         approval_id = self._new_id()
         token = secrets.token_urlsafe(32)
@@ -207,6 +213,12 @@ class ApprovalService:
             raise ApprovalExpiredError("approval request has expired")
         if request_fingerprint(request) != record.request_fingerprint:
             raise ApprovalError("approval is bound to a different action request")
+        if record.risk_reservation_id is not None:
+            self._assert_reservation_active(
+                record.risk_reservation_id,
+                record.risk_mission_key,
+                record.risk_points,
+            )
         consumed = replace(
             record, status=ApprovalStatus.CONSUMED, consumed_at=self._now()
         )
@@ -215,8 +227,30 @@ class ApprovalService:
         return consumed
 
     def reservation_id_for(self, credential: ApprovalCredential) -> str | None:
-        """Return reservation metadata only after authenticating the secret."""
-        return self._load_and_authenticate(credential).risk_reservation_id
+        """Return an active reservation only after authenticating the secret."""
+        record = self._load_and_authenticate(credential)
+        if record.risk_reservation_id is not None:
+            self._assert_reservation_active(
+                record.risk_reservation_id, record.risk_mission_key, record.risk_points
+            )
+        return record.risk_reservation_id
+
+    def _assert_reservation_active(
+        self, reservation_id: str, mission_key: str | None, points: int
+    ) -> None:
+        if self._risk_budget is None:
+            raise ApprovalError("risk budget ledger unavailable")
+        try:
+            reservation = self._risk_budget.reservation(reservation_id)
+        except Exception as exc:
+            raise ApprovalError("risk reservation lookup failed") from exc
+        if (
+            reservation is None
+            or reservation.status != "RESERVED"
+            or reservation.mission_key != mission_key
+            or reservation.points != points
+        ):
+            raise ApprovalError("risk reservation is missing, inactive, or mismatched")
 
     def _release_reservation(self, record: ApprovalRecord) -> None:
         if record.risk_reservation_id is None:

@@ -100,7 +100,13 @@ def test_recovery_releases_confirmed_executor_failure():
 
 def test_recovery_is_idempotent_after_terminal_transition():
     journal = InMemoryExecutionJournal()
-    journal.prepare(record(ExecutionState.EXECUTED))
+    journal.prepare(record())
+    assert journal.transition(
+        "exec-1", ExecutionState.PREPARED, ExecutionState.EXECUTING, NOW
+    )
+    assert journal.transition(
+        "exec-1", ExecutionState.EXECUTING, ExecutionState.EXECUTED, NOW
+    )
     ledger = reserved_ledger()
     service = ExecutionRecoveryService(journal, ledger, lambda: NOW)
 

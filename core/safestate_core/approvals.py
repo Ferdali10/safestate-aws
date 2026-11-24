@@ -128,6 +128,14 @@ class ApprovalService:
         ):
             raise ApprovalError("decision does not authorize an approval workflow")
         if decision.risk_reservation_id is not None:
+            expected_mission_key = (
+                f"{request.agent_id}:{request.mission_id}:{request.mission_version}"
+            )
+            if (
+                decision.risk_mission_key != expected_mission_key
+                or decision.risk_reservation_id != f"{expected_mission_key}:{request.request_id}"
+            ):
+                raise ApprovalError("risk reservation is not bound to this request mission")
             if self._risk_budget is None:
                 raise ApprovalError("risk budget ledger is required for reserved approvals")
             self._assert_reservation_active(

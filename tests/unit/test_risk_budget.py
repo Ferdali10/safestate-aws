@@ -17,37 +17,37 @@ MISSION_KEY = "agent:mission:v1"
 
 def test_reservation_counts_against_available_budget_but_not_spent():
     store = InMemoryRiskBudgetStore()
-    assert store.reserve(MISSION_KEY, "req-1", 3, 5)
+    assert store.reserve(MISSION_KEY, "agent:mission:v1:req-1", 3, 5)
     assert store.reserved(MISSION_KEY) == 3
     assert store.spent(MISSION_KEY) == 0
-    assert not store.reserve(MISSION_KEY, "req-2", 3, 5)
+    assert not store.reserve(MISSION_KEY, "agent:mission:v1:req-2", 3, 5)
 
 
 def test_settlement_moves_reserved_points_to_spent_idempotently():
     store = InMemoryRiskBudgetStore()
-    assert store.reserve(MISSION_KEY, "req-1", 3, 5)
-    assert store.settle("req-1")
-    assert store.settle("req-1")
+    assert store.reserve(MISSION_KEY, "agent:mission:v1:req-1", 3, 5)
+    assert store.settle("agent:mission:v1:req-1")
+    assert store.settle("agent:mission:v1:req-1")
     assert store.reserved(MISSION_KEY) == 0
     assert store.spent(MISSION_KEY) == 3
-    assert store.reservation("req-1").status == "SETTLED"
+    assert store.reservation("agent:mission:v1:req-1").status == "SETTLED"
 
 
 def test_release_returns_points_and_is_idempotent():
     store = InMemoryRiskBudgetStore()
-    assert store.reserve(MISSION_KEY, "req-1", 3, 5)
-    assert store.release("req-1")
-    assert store.release("req-1")
+    assert store.reserve(MISSION_KEY, "agent:mission:v1:req-1", 3, 5)
+    assert store.release("agent:mission:v1:req-1")
+    assert store.release("agent:mission:v1:req-1")
     assert store.reserved(MISSION_KEY) == 0
     assert store.spent(MISSION_KEY) == 0
-    assert store.reserve(MISSION_KEY, "req-2", 5, 5)
+    assert store.reserve(MISSION_KEY, "agent:mission:v1:req-2", 5, 5)
 
 
 def test_reservation_id_cannot_be_reused_for_different_payload():
     store = InMemoryRiskBudgetStore()
-    assert store.reserve(MISSION_KEY, "req-1", 2, 5)
+    assert store.reserve(MISSION_KEY, "agent:mission:v1:req-1", 2, 5)
     with pytest.raises(ValueError):
-        store.reserve(MISSION_KEY, "req-1", 3, 5)
+        store.reserve(MISSION_KEY, "agent:mission:v1:req-1", 3, 5)
 
 
 def test_concurrent_reservations_never_overspend():
@@ -56,7 +56,7 @@ def test_concurrent_reservations_never_overspend():
 
     def reserve(i):
         barrier.wait()
-        return store.reserve(MISSION_KEY, f"req-{i}", 2, 10)
+        return store.reserve(MISSION_KEY, f"agent:mission:v1:req-{i}", 2, 10)
 
     with ThreadPoolExecutor(max_workers=12) as pool:
         outcomes = list(pool.map(reserve, range(12)))
@@ -98,7 +98,7 @@ class Policy:
         )
 
 
-def request(request_id="req-1"):
+def request(request_id="agent:mission:v1:req-1"):
     return ActionRequest(
         request_id, "agent", "mission", "v1", ActionType.DESCRIBE_INSTANCE,
         "i-dev-1", ResourceType.EC2_INSTANCE, {}, NOW,
@@ -122,7 +122,7 @@ def test_decision_service_creates_reservation_not_spend():
     store = InMemoryRiskBudgetStore()
     decision = service_for(store).decide(request())
     assert decision.status is DecisionStatus.ALLOW
-    assert decision.risk_reservation_id == "req-1"
+    assert decision.risk_reservation_id == "agent:mission:v1:req-1"
     assert decision.risk_points == 3
     assert store.reserved(MISSION_KEY) == 3
     assert store.spent(MISSION_KEY) == 0
@@ -130,7 +130,7 @@ def test_decision_service_creates_reservation_not_spend():
 
 def test_decision_service_blocks_when_budget_is_insufficient():
     store = InMemoryRiskBudgetStore()
-    assert store.reserve(MISSION_KEY, "other-request", 3, 5)
+    assert store.reserve(MISSION_KEY, "agent:mission:v1:other-request", 3, 5)
     decision = service_for(store).decide(request())
     assert decision.status is DecisionStatus.BLOCK
     assert decision.rule_id == "R8"

@@ -15,7 +15,9 @@ import json
 import sys
 from typing import Any, Callable
 
-from safestate_core.approvals import ApprovalCredential, ApprovalService, InMemoryApprovalStore
+from safestate_core.approvals import (
+    ApprovalCredential, ApprovalError, ApprovalService, InMemoryApprovalStore,
+)
 from safestate_core.controls import InMemoryRiskBudgetStore, InMemoryTripwireHandler
 from safestate_core.execution import ExecutionGateway, SimulatedAWSExecutor
 from safestate_core.models import (
@@ -84,6 +86,19 @@ def make_mission(allow_stop: bool = True, budget: int | None = RISK_BUDGET) -> M
     )
 
 
+class HumanInbox:
+    """Stands in for the human approval channel (email/Slack). The agent never sees it."""
+
+    def __init__(self) -> None:
+        self.credentials: dict[str, ApprovalCredential] = {}
+
+    def deliver(self, credential: ApprovalCredential, request: ActionRequest, decision: Any) -> None:
+        self.credentials[credential.approval_id] = credential
+
+    def take(self, approval_id: str | None) -> ApprovalCredential:
+        return self.credentials[approval_id]
+
+
 class NonReservingBudget:
     """Budget view for revalidation: the approval already holds the reservation."""
 
@@ -105,6 +120,7 @@ class Stack:
     executor: CountingExecutor
     tripwires: InMemoryTripwireHandler
     budget: InMemoryRiskBudgetStore
+    inbox: HumanInbox
 
 
 def build(mission: MissionContract | None = None, fail_missions: bool = False) -> Stack:
@@ -134,11 +150,12 @@ def build(mission: MissionContract | None = None, fail_missions: bool = False) -
         risk_budget_store=budget,
     )
     executor = CountingExecutor()
+    inbox = HumanInbox()
     gateway = ExecutionGateway(
         decisions, approvals, executor, Revalidator(),
-        risk_budget_store=budget, clock=clock,
+        risk_budget_store=budget, clock=clock, approval_notifier=inbox,
     )
-    return Stack(decisions, gateway, approvals, executor, tripwires, budget)
+    return Stack(decisions, gateway, approvals, executor, tripwires, budget, inbox)
 
 
 def payload(action: str, resource_id: str, resource_type: str, request_id: str,
@@ -219,12 +236,14 @@ def a5() -> Result:
     s = build(make_mission(budget=60))  # room for two stop approvals (20 points each)
     original = req(STOP, "i-dev-001", EC2, "a5")
     r = s.gateway.submit(original)
-    s.approvals.approve(r.approval, "human-approver")
-    first = s.gateway.execute_approved(original, r.approval)
-    replay = s.gateway.execute_approved(original, r.approval)
+    cred = s.inbox.take(r.approval_id)
+    s.approvals.approve(cred, "human-approver")
+    first = s.gateway.execute_approved(original, cred)
+    replay = s.gateway.execute_approved(original, cred)
     other = s.gateway.submit(req(STOP, "i-dev-001", EC2, "a5-other"))
-    s.approvals.approve(other.approval, "human-approver")
-    altered = s.gateway.execute_approved(req(STOP, "i-dev-001", EC2, "a5-altered"), other.approval)
+    other_cred = s.inbox.take(other.approval_id)
+    s.approvals.approve(other_cred, "human-approver")
+    altered = s.gateway.execute_approved(req(STOP, "i-dev-001", EC2, "a5-altered"), other_cred)
     ok = (first.outcome == "EXECUTED" and replay.outcome != "EXECUTED"
           and altered.outcome != "EXECUTED" and s.executor.calls == 1)
     return Result("A5", "Approval replay",
@@ -292,7 +311,39 @@ def a10() -> Result:
                   "BLOCK R9, session revoked", s.executor.calls, ok)
 
 
-SCENARIOS: tuple[Callable[[], Result], ...] = (a1, a2, a3, a4, a5, a6, a7, a8, a9, a10)
+def a11() -> Result:
+    s = build()
+    r = s.gateway.submit(req(STOP, "i-dev-001", EC2, "a11"))
+    leaked = r.approval is not None
+    try:  # even if the secret leaked, the requester cannot decide its own approval
+        s.approvals.approve(s.inbox.take(r.approval_id), AGENT)
+        self_approved = True
+    except ApprovalError:
+        self_approved = False
+    ok = not leaked and not self_approved and s.executor.calls == 0
+    return Result("A11", "Agent approves its own request",
+                  "Ask for a stop, then approve it as the agent (secret was not returned to it).",
+                  f"{r.outcome}; secret returned to agent={leaked}; self-approval accepted="
+                  f"{self_approved}",
+                  "secret goes to humans only; self-approval refused", s.executor.calls, ok)
+
+
+def a12() -> Result:
+    s = build(make_mission(budget=100))
+    flood = [s.gateway.submit(req(STOP, "i-dev-001", EC2, f"a12-{i}")).outcome for i in range(8)]
+    pending = flood.count("APPROVAL_REQUIRED")
+    read = s.gateway.submit(req(DESCRIBE, "i-dev-001", EC2, "a12-read"))
+    ok = pending == 3 and read.outcome == "EXECUTED" and s.executor.calls == 1
+    return Result("A12", "Approval flood to starve the budget",
+                  "Send 8 stop requests that no human will answer, then a normal read.",
+                  f"{pending} approvals opened, {flood.count('BLOCKED')} blocked; "
+                  f"legitimate read -> {read.outcome}",
+                  "max 3 open approvals; reads keep working", s.executor.calls, ok)
+
+
+SCENARIOS: tuple[Callable[[], Result], ...] = (
+    a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12,
+)
 
 
 def run_all() -> list[Result]:

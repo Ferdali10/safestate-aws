@@ -35,6 +35,10 @@ class ApprovalRecord:
     risk_reservation_id: str | None = None
     risk_mission_key: str | None = None
     risk_points: int = 0
+    # Identity of the agent that asked; it can never approve its own request.
+    requested_by: str | None = None
+    # agent:mission:version, used to cap open approvals per mission.
+    mission_key: str | None = None
 
 
 class ApprovalStore(Protocol):
@@ -46,6 +50,9 @@ class ApprovalStore(Protocol):
         self, approval_id: str, expected: ApprovalStatus,
         updated: ApprovalRecord,
     ) -> bool: ...
+    def list_open(self) -> list[ApprovalRecord]:
+        """Return records still PENDING or APPROVED (not yet consumed/closed)."""
+        ...
 
 
 class InMemoryApprovalStore:
@@ -64,6 +71,13 @@ class InMemoryApprovalStore:
     def get(self, approval_id: str) -> ApprovalRecord | None:
         with self._lock:
             return self._records.get(approval_id)
+
+    def list_open(self) -> list[ApprovalRecord]:
+        with self._lock:
+            return [
+                record for record in self._records.values()
+                if record.status in (ApprovalStatus.PENDING, ApprovalStatus.APPROVED)
+            ]
 
     def transition(
         self, approval_id: str, expected: ApprovalStatus,
@@ -106,6 +120,7 @@ class ApprovalService:
         id_generator,
         ttl: timedelta = timedelta(minutes=10),
         risk_budget_store=None,
+        max_open_per_mission: int = 3,
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("approval TTL must be positive")
@@ -116,6 +131,13 @@ class ApprovalService:
         self._new_id = id_generator
         self._ttl = ttl
         self._risk_budget = risk_budget_store
+        if (
+            isinstance(max_open_per_mission, bool)
+            or not isinstance(max_open_per_mission, int)
+            or max_open_per_mission < 1
+        ):
+            raise ValueError("max_open_per_mission must be a positive integer")
+        self._max_open = max_open_per_mission
 
     def issue(self, request: ActionRequest, decision: Decision) -> ApprovalCredential:
         """Issue an opaque credential only for a genuine REQUIRE_APPROVAL decision."""
@@ -144,6 +166,15 @@ class ApprovalService:
                 decision.risk_points,
             )
         now = self._now()
+        mission_key = f"{request.agent_id}:{request.mission_id}:{request.mission_version}"
+        open_count = sum(
+            1 for item in self._store.list_open()
+            if item.mission_key == mission_key and now < item.expires_at
+        )
+        if open_count >= self._max_open:
+            if decision.risk_reservation_id is not None:
+                self._release_reservation_by_id(decision.risk_reservation_id)
+            raise ApprovalError("too many open approvals for this mission")
         approval_id = self._new_id()
         token = secrets.token_urlsafe(32)
         record = ApprovalRecord(
@@ -158,6 +189,8 @@ class ApprovalService:
             risk_reservation_id=decision.risk_reservation_id,
             risk_mission_key=decision.risk_mission_key,
             risk_points=decision.risk_points,
+            requested_by=request.agent_id,
+            mission_key=mission_key,
         )
         try:
             self._store.create(record)
@@ -179,6 +212,8 @@ class ApprovalService:
         if not isinstance(approver_id, str) or not approver_id.strip():
             raise ApprovalError("authenticated approver identity is required")
         record = self._load_and_authenticate(credential)
+        if record.requested_by is not None and approver_id.strip() == record.requested_by:
+            raise ApprovalError("the requesting agent cannot decide its own approval")
         now = self._now()
         if now >= record.expires_at:
             expired = replace(record, status=ApprovalStatus.EXPIRED)
@@ -207,6 +242,27 @@ class ApprovalService:
             raise ApprovalError("approval state changed concurrently")
         self._release_reservation(record)
         return expired
+
+    def expire_stale(self) -> int:
+        """Expire every open approval past its deadline and free its reserved budget.
+
+        Safe to call repeatedly (for example before each request or from a
+        scheduled job). A record whose reservation cannot be released is left
+        open so the next sweep retries it.
+        """
+        now = self._now()
+        expired_count = 0
+        for record in self._store.list_open():
+            if now < record.expires_at:
+                continue
+            try:
+                self._release_reservation(record)
+            except ApprovalError:
+                continue
+            expired = replace(record, status=ApprovalStatus.EXPIRED)
+            if self._store.transition(record.approval_id, record.status, expired):
+                expired_count += 1
+        return expired_count
 
     def consume(self, credential: ApprovalCredential, request: ActionRequest) -> ApprovalRecord:
         """Atomically consume an approved grant using its secret and exact request."""
@@ -259,6 +315,16 @@ class ApprovalService:
             or reservation.points != points
         ):
             raise ApprovalError("risk reservation is missing, inactive, or mismatched")
+
+    def _release_reservation_by_id(self, reservation_id: str) -> None:
+        if self._risk_budget is None:
+            raise ApprovalError("risk budget ledger unavailable; reservation cannot be released")
+        try:
+            released = self._risk_budget.release(reservation_id)
+        except Exception as exc:
+            raise ApprovalError("risk reservation release failed") from exc
+        if released is not True:
+            raise ApprovalError("risk reservation could not be released")
 
     def _release_reservation(self, record: ApprovalRecord) -> None:
         if record.risk_reservation_id is None:

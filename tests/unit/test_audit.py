@@ -162,3 +162,47 @@ def test_approval_decision_is_audited_without_changing_status():
     result = service.decide_raw({})
     assert result.status is DecisionStatus.REQUIRE_APPROVAL
     assert sink.records[0]["status"] == "REQUIRE_APPROVAL"
+
+
+def test_many_writers_on_one_file_keep_a_single_valid_chain(tmp_path):
+    import threading
+
+    path = tmp_path / "shared.jsonl"
+    sinks = [JsonlAuditSink(path) for _ in range(4)]  # like four Lambda instances
+    errors = []
+
+    def work(sink, offset):
+        for i in range(40):
+            n = offset * 1000 + i
+            try:
+                sink.append({
+                    "event_id": f"e{n}", "timestamp": "2026-11-25T12:00:00+00:00",
+                    "request_id": f"r{n}", "decision_id": f"d{n}", "status": "ALLOW",
+                    "rule_id": "R1", "reason_code": "X", "policy_version": "v",
+                })
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(sink, k)) for k, sink in enumerate(sinks)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    result = sinks[0].verify()
+    assert errors == []
+    assert result.valid and result.records_checked == 160
+
+
+def test_append_detects_tampering_of_the_last_record(tmp_path):
+    path = tmp_path / "a.jsonl"
+    sink = JsonlAuditSink(path)
+    record = {
+        "event_id": "e1", "timestamp": "2026-11-25T12:00:00+00:00", "request_id": "r1",
+        "decision_id": "d1", "status": "ALLOW", "rule_id": "R1", "reason_code": "X",
+        "policy_version": "v",
+    }
+    sink.append(record)
+    path.write_text(path.read_text().replace("ALLOW", "BLOCK"))
+    fresh = JsonlAuditSink(path)
+    with pytest.raises(ValueError):
+        fresh.append({**record, "event_id": "e2"})

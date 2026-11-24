@@ -256,3 +256,33 @@ def test_valid_cost_parameters_are_accepted():
 @pytest.mark.parametrize("bad", ["", "   ", "x" * 201, "line\nbreak", "tab\there", "nul\x00", 5])
 def test_stop_reason_must_be_short_printable_text(bad):
     reject("INVALID_PARAMETER_VALUE", parameters={"reason": bad})
+
+
+@pytest.mark.parametrize(
+    "resource_id",
+    ["../../etc/passwd", "i-", "i-DEV", "i-dev/001", "vol-dev", "i-dev..001", "x" * 90, "i-dev 001"],
+)
+def test_ec2_resource_id_format_is_enforced(resource_id):
+    reject("INVALID_RESOURCE_ID", action="DESCRIBE_INSTANCE", resource_id=resource_id,
+           resource_type="EC2_INSTANCE")
+
+
+@pytest.mark.parametrize("bucket", ["A", "ab", "../x", "bucket..name", "-bucket", "UPPER"])
+def test_s3_bucket_name_format_is_enforced(bucket):
+    reject("INVALID_RESOURCE_ID", action="GET_BUCKET_METADATA", resource_id=bucket,
+           resource_type="S3_BUCKET")
+
+
+def test_well_formed_resource_ids_are_accepted():
+    assert parse_request(payload(action="DESCRIBE_INSTANCE", resource_id="i-0abc123",
+                                 resource_type="EC2_INSTANCE", parameters={})).resource_id == "i-0abc123"
+    assert parse_request(payload(action="GET_BUCKET_METADATA", resource_id="reports.bucket-1",
+                                 resource_type="S3_BUCKET", parameters={})).resource_id == "reports.bucket-1"
+
+
+def test_invisible_characters_do_not_hide_a_decoy_name():
+    from safestate_core.actions import normalize_action_name
+    plain = normalize_action_name("get_admin_credentials")
+    assert normalize_action_name("get_admin​_credentials") == plain
+    assert normalize_action_name("get‮_admin_credentials⁠") == plain
+    assert normalize_action_name("get admin\tcredentials") == plain

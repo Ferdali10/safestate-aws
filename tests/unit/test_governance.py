@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import itertools
 
+import pytest
+
 from safestate_core.audit import AuditedDecisionService, JsonlAuditSink
 from safestate_core.controls import InMemoryRiskBudgetStore, InMemoryTripwireHandler
 from safestate_core.models import (
@@ -249,3 +251,28 @@ def test_r9_revocation_lookup_failure_fails_closed():
     result = make_service(tripwires=BrokenLookup()).decide(request())
     assert result.status is DecisionStatus.BLOCK
     assert result.reason_code == "DECISION_PIPELINE_ERROR"
+
+
+def test_request_timestamp_window_is_enforced():
+    from datetime import timedelta
+    service = make_service()
+    assert service.decide(request(requested_at=NOW - timedelta(minutes=10))).status is not DecisionStatus.BLOCK
+    for delta in (timedelta(minutes=-16), timedelta(minutes=6), timedelta(days=3650), timedelta(days=-3650)):
+        result = service.decide(request(requested_at=NOW + delta))
+        assert result.status is DecisionStatus.BLOCK
+        assert result.reason_code == "REQUEST_TIMESTAMP_OUT_OF_RANGE"
+
+
+def test_operator_can_reinstate_a_revoked_agent():
+    handler = InMemoryTripwireHandler(lambda: "incident-005", lambda: NOW)
+    service = make_service(
+        mission(decoy_resource_ids=frozenset({"i-decoy-001"})), tripwires=handler
+    )
+    service.decide(request(resource_id="i-decoy-001"))
+    assert service.decide(request(request_id="r-2")).reason_code == "AGENT_SESSION_REVOKED"
+    with pytest.raises(ValueError):
+        handler.reinstate("cost-agent", " ")
+    assert handler.reinstate("cost-agent", "operator-1") is True
+    assert handler.reinstate("cost-agent", "operator-1") is False
+    assert service.decide(request(request_id="r-3")).status is DecisionStatus.ALLOW
+    assert handler.reinstatements[0][:2] == ("cost-agent", "operator-1")

@@ -146,6 +146,16 @@ def validate_request(request: ActionRequest) -> None:
             "INVALID_RESOURCE_ID", f"{action.value} must target one specific resource"
         )
 
+    if not is_wildcard:
+        pattern = _RESOURCE_ID_PATTERNS.get(request.resource_type)
+        if pattern is None or not pattern.match(request.resource_id) or (
+            ".." in request.resource_id
+        ):
+            raise ValidationError(
+                "INVALID_RESOURCE_ID",
+                f"resource id is not a valid {request.resource_type.value} identifier",
+            )
+
     if not isinstance(request.parameters, dict):
         raise ValidationError("INVALID_PARAMETER_VALUE", "parameters must be an object")
     unsupported = set(request.parameters) - ALLOWED_PARAMETER_KEYS[action]
@@ -159,6 +169,11 @@ def validate_request(request: ActionRequest) -> None:
 
 
 MAX_RESULTS_LIMIT = 1000
+_RESOURCE_ID_PATTERNS = {
+    ResourceType.EC2_INSTANCE: re.compile(r"^i-[a-z0-9][a-z0-9-]{0,60}$"),
+    ResourceType.EBS_VOLUME: re.compile(r"^vol-[a-z0-9][a-z0-9-]{0,60}$"),
+    ResourceType.S3_BUCKET: re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"),
+}
 MAX_REASON_LENGTH = 200
 MAX_DATE_RANGE_DAYS = 366
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")

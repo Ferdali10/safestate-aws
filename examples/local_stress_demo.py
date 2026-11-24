@@ -137,6 +137,8 @@ def build(mission: MissionContract | None = None, fail_missions: bool = False) -
             missions, Inventory(), DeterministicPolicyEngine(clock, new_id),
             clock, new_id, risk_budget_store=budget if with_budget else NonReservingBudget(),
             tripwire_handler=tripwires,
+            # Revalidating an approved request can happen up to the approval TTL later.
+            max_request_age=timedelta(hours=24) if not with_budget else timedelta(minutes=15),
         )
 
     decisions = service(True)

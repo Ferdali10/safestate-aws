@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
 from typing import Any, Mapping
 
 from .actions import DEFAULT_RISK_COSTS, classify_unknown_action, normalize_action_name
@@ -49,7 +50,15 @@ class DefaultDecisionService:
         risk_budget_store: RiskBudgetStore | None = None,
         tripwire_handler: TripwireHandler | None = None,
         risk_costs: Mapping[ActionType, int] | None = None,
+        max_request_age: timedelta = timedelta(minutes=15),
+        max_future_skew: timedelta = timedelta(minutes=5),
     ) -> None:
+        # A service that revalidates old approved requests must be given a
+        # max_request_age at least as long as the approval TTL.
+        if max_request_age <= timedelta(0) or max_future_skew < timedelta(0):
+            raise ValueError("request time window must be positive")
+        self._max_age = max_request_age
+        self._max_skew = max_future_skew
         self._missions = mission_provider
         self._resources = resource_provider
         self._policy = policy_engine
@@ -111,6 +120,12 @@ class DefaultDecisionService:
             )
 
         try:
+            drift = self._clock() - request.requested_at
+            if drift > self._max_age or -drift > self._max_skew:
+                return self._blocked(
+                    request_id, "R7", "REQUEST_TIMESTAMP_OUT_OF_RANGE",
+                    "The request timestamp is too old or too far in the future.",
+                )
             mission = self._missions.get_active_mission(
                 request.agent_id, request.mission_id
             )

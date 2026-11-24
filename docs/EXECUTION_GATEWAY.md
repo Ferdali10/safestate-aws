@@ -22,6 +22,30 @@ state and is intended for deterministic tests and demonstrations.
   it cannot honestly be represented as a rollback.
 - Any decision, approval, revalidation, or accounting error fails closed.
 
+## Journal-integrated execution mode
+
+Callers may inject an `ExecutionJournal` into `ExecutionGateway`. When
+configured, the gateway creates a request-bound `PREPARED` record and must
+claim the conditional `PREPARED -> EXECUTING` transition before calling the
+executor. Confirmed success is recorded as `EXECUTED`, the R8 reservation is
+settled, and the record is finalized as `SETTLED`.
+
+Only `ExecutionNotAppliedError` is treated as a guarantee that no side effect
+occurred; that path records `FAILED`, releases the reservation, then records
+`RELEASED`. Other executor exceptions are ambiguous: the gateway attempts
+`UNKNOWN`, retains the reservation, and never retries automatically. If the
+side effect succeeds but journal or accounting finalization fails, the result
+explicitly reports that recovery is required and the reservation is not
+released.
+
+A journal-backed gateway rejects a second submission whose execution record
+is no longer in `PREPARED`. This is a local idempotency guard, not a substitute
+for downstream idempotency keys at an external provider.
+
+The journal parameter is optional for backwards compatibility. Deployments
+that require recovery guarantees must wire a durable implementation; the
+included in-memory adapter is not crash durable.
+
 ## R8 contract
 
 The DecisionService reserves points under the validated request ID. Repeated
@@ -48,7 +72,7 @@ performs no AWS API calls, and state disappears when the process exits.
 - Durable cross-process approval and risk reservation storage with atomic
   conditional transitions.
 - Authenticated human approval UI and identity provider.
-- Side-effect-free policy revalidation plus a durable execution state machine.
+- Side-effect-free policy revalidation plus a durable execution state machine.\n- Downstream idempotency keys for external executors and operator reconciliation for UNKNOWN.
 - AWS executor adapter with narrowly scoped IAM permissions and independent
   server-side authorization.
 - Execution audit events, reservation-expiry sweeper, and reconciliation for

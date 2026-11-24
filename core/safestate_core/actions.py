@@ -83,7 +83,11 @@ def normalize_action_name(value: object) -> str:
     """
     if not isinstance(value, str):
         raise TypeError("action name must be a string")
-    text = unicodedata.normalize("NFKC", value).strip().upper()
+    text = unicodedata.normalize("NFKC", value)
+    # Drop invisible control/format characters (zero-width space, bidi marks...)
+    # so they cannot be used to dodge decoy matching.
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in {"Cc", "Cf"} or ch.isspace())
+    text = text.strip().upper()
     return re.sub(r"[\s\-]+", "_", text)
 
 

@@ -160,6 +160,7 @@ class InMemoryTripwireHandler(TripwireHandler):
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._incidents: list[TripwireIncident] = []
         self._revoked_agents: set[str] = set()
+        self._reinstatements: list[tuple[str, str, datetime]] = []
         self._lock = threading.Lock()
 
     def trigger(
@@ -181,6 +182,28 @@ class InMemoryTripwireHandler(TripwireHandler):
         with self._lock:
             self._incidents.append(incident)
             self._revoked_agents.add(agent_id)
+
+    def reinstate(self, agent_id: str, operator_id: str) -> bool:
+        """Operator action: lift a revocation after investigation.
+
+        Not part of the TripwireHandler protocol on purpose: only an
+        authenticated operator path may call it, never the agent path.
+        """
+        if not isinstance(operator_id, str) or not operator_id.strip():
+            raise ValueError("operator_id is required to reinstate an agent")
+        with self._lock:
+            if agent_id not in self._revoked_agents:
+                return False
+            self._revoked_agents.discard(agent_id)
+            self._reinstatements.append(
+                (agent_id, operator_id.strip(), self._clock().astimezone(timezone.utc))
+            )
+            return True
+
+    @property
+    def reinstatements(self) -> tuple[tuple[str, str, datetime], ...]:
+        with self._lock:
+            return tuple(self._reinstatements)
 
     @property
     def incidents(self) -> tuple[TripwireIncident, ...]:

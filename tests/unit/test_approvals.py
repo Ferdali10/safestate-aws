@@ -19,7 +19,7 @@ NOW = datetime(2026, 11, 23, 12, 0, tzinfo=timezone.utc)
 
 def request(**changes):
     values = dict(
-        request_id="req-1", agent_id="agent-1", mission_id="mission-1",
+        request_id="agent-1:mission-1:v1:req-1", agent_id="agent-1", mission_id="mission-1",
         mission_version="v1", action=ActionType.REQUEST_STOP_INSTANCE,
         resource_id="i-dev-1", resource_type=ResourceType.EC2_INSTANCE,
         parameters={"region": "eu-central-1", "dry_run": False},
@@ -31,7 +31,7 @@ def request(**changes):
 
 def decision(**changes):
     values = dict(
-        decision_id="dec-1", request_id="req-1",
+        decision_id="dec-1", request_id="agent-1:mission-1:v1:req-1",
         status=DecisionStatus.REQUIRE_APPROVAL, rule_id="R3",
         reason_code="STOP_REQUIRES_HUMAN_APPROVAL", reason="Human approval required.",
         policy_version="test-v1", evaluated_at=NOW, approval_required=True,
@@ -200,11 +200,11 @@ def test_ttl_must_be_positive_and_bounded():
 def test_rejected_approval_releases_reserved_budget():
     from safestate_core.controls import InMemoryRiskBudgetStore
     ledger = InMemoryRiskBudgetStore()
-    assert ledger.reserve("agent:mission:v1", "req-1", 2, 5)
+    assert ledger.reserve("agent-1:mission-1:v1", "agent-1:mission-1:v1:req-1", 2, 5)
     req = request()
     decision_with_reservation = decision(
-        risk_reservation_id="req-1",
-        risk_mission_key="agent:mission:v1",
+        risk_reservation_id="agent-1:mission-1:v1:req-1",
+        risk_mission_key="agent-1:mission-1:v1",
         risk_points=2,
     )
     store = InMemoryApprovalStore()
@@ -214,18 +214,18 @@ def test_rejected_approval_releases_reserved_budget():
     )
     credential = svc.issue(req, decision_with_reservation)
     svc.reject(credential, "human:alice")
-    assert ledger.reserved("agent:mission:v1") == 0
-    assert ledger.spent("agent:mission:v1") == 0
+    assert ledger.reserved("agent-1:mission-1:v1") == 0
+    assert ledger.spent("agent-1:mission-1:v1") == 0
 
 
 def test_expiring_approved_request_releases_reserved_budget():
     from safestate_core.controls import InMemoryRiskBudgetStore
     ledger = InMemoryRiskBudgetStore()
-    assert ledger.reserve("agent:mission:v1", "req-1", 2, 5)
+    assert ledger.reserve("agent-1:mission-1:v1", "agent-1:mission-1:v1:req-1", 2, 5)
     req = request()
     decision_with_reservation = decision(
-        risk_reservation_id="req-1",
-        risk_mission_key="agent:mission:v1",
+        risk_reservation_id="agent-1:mission-1:v1:req-1",
+        risk_mission_key="agent-1:mission-1:v1",
         risk_points=2,
     )
     store = InMemoryApprovalStore()
@@ -239,7 +239,7 @@ def test_expiring_approved_request_releases_reserved_budget():
     now[0] += timedelta(minutes=1)
     expired = svc.expire(credential)
     assert expired.status is ApprovalStatus.EXPIRED
-    assert ledger.reserved("agent:mission:v1") == 0
+    assert ledger.reserved("agent-1:mission-1:v1") == 0
 
 
 def test_issue_failure_releases_reserved_budget():
@@ -252,7 +252,7 @@ def test_issue_failure_releases_reserved_budget():
         def transition(self, approval_id, expected, updated):
             return False
     ledger = InMemoryRiskBudgetStore()
-    assert ledger.reserve("agent:mission:v1", "req-1", 2, 5)
+    assert ledger.reserve("agent-1:mission-1:v1", "agent-1:mission-1:v1:req-1", 2, 5)
     svc = ApprovalService(
         BrokenStore(), lambda: NOW, lambda: "approval-broken",
         risk_budget_store=ledger,
@@ -261,9 +261,9 @@ def test_issue_failure_releases_reserved_budget():
         svc.issue(
             request(),
             decision(
-                risk_reservation_id="req-1",
-                risk_mission_key="agent:mission:v1",
+                risk_reservation_id="agent-1:mission-1:v1:req-1",
+                risk_mission_key="agent-1:mission-1:v1",
                 risk_points=2,
             ),
         )
-    assert ledger.reserved("agent:mission:v1") == 0
+    assert ledger.reserved("agent-1:mission-1:v1") == 0

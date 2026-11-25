@@ -170,8 +170,10 @@ def test_many_writers_on_one_file_keep_a_single_valid_chain(tmp_path):
     path = tmp_path / "shared.jsonl"
     sinks = [JsonlAuditSink(path) for _ in range(4)]  # like four Lambda instances
     errors = []
+    start = threading.Barrier(len(sinks))
 
     def work(sink, offset):
+        start.wait()
         for i in range(40):
             n = offset * 1000 + i
             try:
@@ -189,8 +191,51 @@ def test_many_writers_on_one_file_keep_a_single_valid_chain(tmp_path):
     for thread in threads:
         thread.join()
     result = sinks[0].verify()
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert errors == []
     assert result.valid and result.records_checked == 160
+    assert len(records) == 160
+    assert {record["event_id"] for record in records} == {
+        f"e{offset * 1000 + i}" for offset in range(4) for i in range(40)
+    }
+
+
+def test_concurrent_writers_on_different_files_keep_independent_chains(tmp_path):
+    import threading
+
+    sinks = [JsonlAuditSink(tmp_path / f"journal-{index}.jsonl") for index in range(4)]
+    errors = []
+    start = threading.Barrier(len(sinks))
+
+    def work(sink, offset):
+        start.wait()
+        for i in range(40):
+            n = offset * 1000 + i
+            try:
+                sink.append({
+                    "event_id": f"e{n}", "timestamp": "2026-11-25T12:00:00+00:00",
+                    "request_id": f"r{n}", "decision_id": f"d{n}", "status": "ALLOW",
+                    "rule_id": "R1", "reason_code": "X", "policy_version": "v",
+                })
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(sink, index))
+               for index, sink in enumerate(sinks)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    for index, sink in enumerate(sinks):
+        result = sink.verify()
+        records = [json.loads(line) for line in sink.path.read_text(encoding="utf-8").splitlines()]
+        assert result.valid and result.records_checked == 40
+        assert len(records) == 40
+        assert {record["event_id"] for record in records} == {
+            f"e{index * 1000 + i}" for i in range(40)
+        }
 
 
 def test_append_detects_tampering_of_the_last_record(tmp_path):

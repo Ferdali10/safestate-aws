@@ -8,19 +8,41 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import threading
+import time
 from typing import Any, Callable, Mapping, Protocol
 
 from .models import Decision, DecisionStatus
 
-try:  # POSIX advisory lock so several processes can append to one journal safely
+try:  # POSIX advisory lock for cross-process coordination.
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
+
+try:  # Windows byte-range lock for cross-process coordination.
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX platforms
+    msvcrt = None  # type: ignore[assignment]
+
+
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _thread_lock_for(path: Path) -> threading.RLock:
+    """Return one process-wide lock for a canonical journal path."""
+    key = os.path.normcase(str(path.resolve()))
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[key] = lock
+        return lock
 
 GENESIS_HASH = "0" * 64
 SCHEMA_VERSION = 1
@@ -100,34 +122,67 @@ def _event_hash(record: Mapping[str, Any]) -> str:
 
 
 class _ExclusiveFileLock:
-    """Cross-process exclusive lock held for the duration of one append."""
+    """Per-path thread and process lock held across a journal transaction."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
+        self._thread_lock = _thread_lock_for(path)
         self._handle = None
 
     def __enter__(self) -> "_ExclusiveFileLock":
-        if fcntl is None:  # pragma: no cover - the in-process lock still applies
-            return self
-        self._handle = open(self._path, "a+b")
-        fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+        self._thread_lock.acquire()
+        try:
+            self._handle = open(self._path, "a+b")
+            if fcntl is not None:
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:  # pragma: no branch - selected by platform
+                # Lock one stable byte in the sidecar. LK_NBLCK lets us wait
+                # indefinitely instead of failing after LK_LOCK's retry cap.
+                self._handle.seek(0, os.SEEK_END)
+                if self._handle.tell() == 0:
+                    self._handle.write(b"\0")
+                    self._handle.flush()
+                while True:
+                    self._handle.seek(0)
+                    try:
+                        msvcrt.locking(self._handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as exc:
+                        if exc.errno not in {errno.EACCES, errno.EDEADLK}:
+                            raise
+                        time.sleep(0.01)
+            else:  # pragma: no cover - unsupported platform
+                raise RuntimeError("no supported inter-process file locking API")
+        except Exception:
+            if self._handle is not None:
+                self._handle.close()
+                self._handle = None
+            self._thread_lock.release()
+            raise
         return self
 
     def __exit__(self, *exc_info: object) -> None:
-        if self._handle is not None:
-            try:
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-            finally:
+        try:
+            if self._handle is not None:
+                if fcntl is not None:
+                    fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+                elif msvcrt is not None:  # pragma: no branch - selected by platform
+                    self._handle.seek(0)
+                    msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            if self._handle is not None:
                 self._handle.close()
                 self._handle = None
+            self._thread_lock.release()
 
 
 class JsonlAuditSink:
     """Append-only JSONL writer with a SHA-256 hash chain.
 
-    Appends are serialized across threads (a lock) and across processes or sink
-    instances sharing the file (an exclusive flock on a sidecar .lock file), so
-    concurrent writers extend one chain instead of forking it. The full journal
+    Appends are serialized across sink instances in one process and across
+    processes using a per-path thread lock plus the platform's sidecar lock
+    (flock on POSIX, a byte-range lock on Windows), so concurrent writers extend
+    one chain instead of forking it. The full journal
     is verified on the first append of each sink instance; later appends read
     and check only the last record, so cost does not grow with journal size.
     Call verify() periodically to re-check the whole chain.
@@ -162,7 +217,7 @@ class JsonlAuditSink:
             previous_hash = GENESIS_HASH
             if self.path.exists() and self.path.stat().st_size:
                 if not self._verified:
-                    result = self.verify()
+                    result = self._verify_unlocked()
                     if not result.valid:
                         raise ValueError(
                             f"existing audit journal is invalid: {result.error}"
@@ -205,6 +260,15 @@ class JsonlAuditSink:
 
     def verify(self) -> VerificationResult:
         """Verify every record, hash, schema and chain link in the journal."""
+        # Preserve the no-side-effect result for a missing journal. This check
+        # can be linearized before a concurrent first append.
+        if not self.path.exists():
+            return VerificationResult(True, 0)
+        with self._file_lock():
+            return self._verify_unlocked()
+
+    def _verify_unlocked(self) -> VerificationResult:
+        """Verify the journal while the caller holds its per-path lock."""
         if not self.path.exists():
             return VerificationResult(True, 0)
         previous_hash = GENESIS_HASH

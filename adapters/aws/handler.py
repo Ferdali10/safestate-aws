@@ -17,9 +17,13 @@ from safestate_core.validation import UnknownActionError, ValidationError, parse
 
 
 class TrustedIdentityResolver(Protocol):
-    """Resolve an authenticated agent identity from trusted event context."""
+    """Resolve identity from an independently verified source.
 
-    def resolve(self, event: Mapping[str, Any]) -> str: ...
+    The Gateway event contains tool arguments. Lambda context carries routing
+    metadata; neither is inherently an authenticated agent identity.
+    """
+
+    def resolve(self, event: Mapping[str, Any], context: Any) -> str: ...
 
 
 class LambdaHandler:
@@ -44,19 +48,20 @@ class LambdaHandler:
             return self._invalid("INVALID_EVENT", "Gateway event must be an object.")
 
         try:
-            agent_id = self._identity.resolve(event)
+            if self._identity is None:
+                raise ValueError("trusted identity resolver is unavailable")
+            agent_id = self._identity.resolve(event, context)
             if not isinstance(agent_id, str) or not agent_id.strip():
                 raise ValueError("trusted identity is unavailable")
         except Exception:  # noqa: BLE001 - identity failure must fail closed
             return self._invalid("TRUSTED_IDENTITY_UNAVAILABLE",
                                  "Authenticated agent identity could not be established.")
 
-        tool_input = event.get("input")
-        if not isinstance(tool_input, Mapping):
-            return self._invalid("INVALID_TOOL_INPUT", "Gateway input must be an object.")
-
-        # Never accept identity, request ID, or timestamp from the agent.
-        payload = dict(tool_input)
+        # AgentCore Gateway Lambda targets pass the tool inputSchema properties
+        # directly as the event map. Routing metadata is in Lambda context.
+        # Never treat an `input` wrapper or identity-like tool arguments as
+        # authenticated identity.
+        payload = dict(event)
         payload.pop("agent_id", None)
         payload.pop("request_id", None)
         payload.pop("requested_at", None)
@@ -72,7 +77,10 @@ class LambdaHandler:
         except (UnknownActionError, ValidationError, TypeError, ValueError):
             # Keep the Core's raw-input path for malformed/unknown actions so
             # configured R9 decoy actions still trigger the existing tripwire.
-            decision = self._decisions.decide_raw(payload)
+            try:
+                decision = self._decisions.decide_raw(payload)
+            except Exception:  # noqa: BLE001 - raw decision faults fail closed
+                return self._invalid("DECISION_SERVICE_FAILURE", "SafeState decision service failed closed.")
             return self._decision_response(decision)
 
         try:
@@ -84,6 +92,7 @@ class LambdaHandler:
     @staticmethod
     def _decision_response(decision: Decision) -> dict[str, Any]:
         return {
+            "outcome": "BLOCKED" if decision.status is DecisionStatus.BLOCK else decision.status.value,
             "decision_id": decision.decision_id,
             "request_id": decision.request_id,
             "decision": decision.status.value,

@@ -1,45 +1,73 @@
 # AWS Lambda adapter
 
-This adapter is a thin boundary around the SafeState Core. It does not contain
-policy rules and does not execute AWS APIs itself.
+This is a local adapter around the existing SafeState Core. It contains no
+policy rules and makes no AWS API calls. No deployed Gateway, Lambda function,
+or live identity propagation has been configured or verified.
 
-## Event contract
+## AgentCore Gateway Lambda event
 
-The handler expects a mapping with an `input` object containing the Core
-request fields: `mission_id`, `mission_version`, `action`, `resource_id`,
-`resource_type`, and optional `parameters`.
+AWS documents a Lambda target event as a map of the properties declared in the
+tool `inputSchema`, passed directly as the event argument. The Lambda `context`
+is a separate second argument. Its `client_context.custom` metadata can contain
+routing values such as `bedrockAgentCoreGatewayId`,
+`bedrockAgentCoreTargetId`, `bedrockAgentCoreToolName`, and request/message
+identifiers. Those fields identify the route and invocation; they are not an
+authenticated agent identity.
 
-The handler generates `request_id` and `requested_at` on the server. Any
-agent-supplied `agent_id`, `request_id`, or `requested_at` is discarded.
+This handler therefore reads tool arguments from the flat event mapping. It
+does not accept the former `{ "input": {...} }` wrapper as an alternate
+contract. The tool schema must provide the SafeState request fields:
+`mission_id`, `mission_version`, `action`, `resource_id`, `resource_type`, and
+optional `parameters`. `agent_id`, `request_id`, and `requested_at` from tool
+arguments are discarded. The adapter creates the latter two server-side and
+sets the timestamp in UTC.
 
-## Trusted identity is deployment-specific
+## Identity resolver contract
 
-Production wiring MUST inject a `TrustedIdentityResolver` that validates an
-authenticated identity from a trusted AgentCore Gateway context. The resolver
-must not read identity from `event["input"]` or any other agent-controlled
-tool argument. If identity cannot be verified, the handler blocks.
+`TrustedIdentityResolver.resolve(event, context)` must return an agent ID only
+after validating it against an independently trusted identity source. The
+handler does not infer identity from tool arguments, tool names, Gateway
+routing metadata, or arbitrary propagated headers. A missing resolver, invalid
+identity, or resolver error blocks before Core decision or execution.
 
-AgentCore context/header propagation must be explicitly configured and protected
-against caller spoofing. This repository does not yet implement a concrete
-AgentCore identity resolver. Do not treat this adapter as production-ready
-until that resolver and its Gateway authentication configuration are reviewed.
+No concrete authenticated identity resolver is included. Production wiring
+must explicitly choose and validate an identity mechanism. Gateway header
+propagation is opt-in through target `metadataConfiguration` allowlists and
+arrives in Lambda client context. Propagation alone does not establish trust:
+the deployment must ensure the value was produced by a trusted authenticator or
+interceptor, cannot be spoofed by the caller, and is cryptographically or
+otherwise authoritatively validated by the resolver. The standard Gateway
+routing metadata does not supply an agent ID. Do not treat this adapter as
+authenticated until that wiring and its evidence are reviewed.
 
-## Dependency injection
+## Core flow and response
 
-Use `build_handler(gateway, decision_service, identity_resolver)` from a
-deployment composition module. The module-level `lambda_handler` deliberately
-fails closed until deployment wiring exists; it does not silently create
-in-memory stores or an executor.
+For a valid request, the handler builds a typed request and calls
+`ExecutionGateway.submit()` once. It does not call `decide_raw()` first. Inputs
+that cannot be parsed, including unknown actions, go through the existing
+`DefaultDecisionService.decide_raw()` path so Core validation and configured
+R9 tripwires remain authoritative. Unexpected raw-decision and gateway errors
+are converted to controlled `BLOCK` responses.
 
-Valid requests go through `ExecutionGateway.submit()` exactly once. Malformed
-or unknown actions go through `DefaultDecisionService.decide_raw()` so the
-Core's existing validation and R9 decoy behavior remain authoritative.
+Responses are built from an explicit set of fields. They may contain the
+non-secret `approval_id`, but never serialize the `GatewayResult` or its
+approval credential/token. The module-level `lambda_handler` remains
+fail-closed until a deployment composition module injects the Core, Gateway,
+and a verified identity resolver.
 
-Only the non-secret `approval_id` may be returned. Approval credentials and
-tokens are never serialized to the agent.
+## Local tests and remaining work
 
-## Current status
+Run from the repository root:
 
-Local unit tests are authored but must be executed before this adapter is
-considered validated. No AWS deployment or real AgentCore identity propagation
-has been performed.
+```bash
+python -m pytest -q tests/unit/test_agentcore_handler.py
+python -m pytest -q
+python examples/local_stress_demo.py
+git diff --check
+```
+
+Tests use local fakes and do not require AWS credentials or incur cloud costs.
+Remaining work for a real integration includes a documented tool schema,
+deployment composition, a verified identity source and resolver, explicit
+Gateway authentication/propagation configuration, and validation in an AWS
+account. None of those deployment steps is claimed complete here.

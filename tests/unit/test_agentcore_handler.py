@@ -65,7 +65,7 @@ def test_valid_input_uses_trusted_identity_and_server_fields():
             "mission_id": "mission-1",
             "mission_version": "v1",
             "action": "LIST_INSTANCES",
-            "resource_id": "account",
+            "resource_id": "*",
             "resource_type": "EC2_INSTANCE",
             "parameters": {},
         }
@@ -117,7 +117,7 @@ def test_approval_secret_is_never_returned():
         "mission_id": "mission-1",
         "mission_version": "v1",
         "action": "LIST_INSTANCES",
-        "resource_id": "account",
+        "resource_id": "*",
         "resource_type": "EC2_INSTANCE",
         "parameters": {},
     }})

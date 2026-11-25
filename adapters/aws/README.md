@@ -4,6 +4,9 @@ This is a local adapter around the existing SafeState Core. It contains no
 policy rules and makes no AWS API calls. No deployed Gateway, Lambda function,
 or live identity propagation has been configured or verified.
 
+For the complete request flow, trust boundaries, response behavior, and audit
+concurrency model, see the [Mission A1 adapter guide](../../docs/AGENTCORE_LAMBDA_ADAPTER.md).
+
 ## AgentCore Gateway Lambda event
 
 AWS documents a Lambda target event as a map of the properties declared in the

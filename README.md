@@ -220,14 +220,15 @@ Build log. An entry is added whenever a real implementation or test fails.
 ```
 safestate-aws/
 ├── core/safestate_core/   # framework-independent policy core (Python)
-├── docs/                  # contract, submission draft
+├── adapters/aws/          # local AgentCore Gateway Lambda adapter
+├── docs/                  # contracts, adapter guides, submission draft
 ├── examples/              # local A1-A12 replay (python examples/local_stress_demo.py)
 ├── tests/unit/            # unit tests for the core
 ├── pyproject.toml
 └── README.md
 ```
 
-The local deterministic core, audit journal, R8 reservation lifecycle, R9 simulation, request-bound human approval workflow and simulated execution gateway are implemented. AWS adapters, durable approval/risk stores, real IAM executor integration and infrastructure are not yet implemented. See [R8/R9 controls](docs/R8_R9_CONTROLS.md).
+The local deterministic core, audit journal, R8 reservation lifecycle, R9 simulation, request-bound human approval workflow, simulated execution gateway, and AgentCore Lambda adapter are implemented. The adapter is local and dependency-injected; a deployed Gateway, authenticated identity resolver, durable approval/risk stores, real IAM executor integration, and AWS infrastructure are not implemented. See [R8/R9 controls](docs/R8_R9_CONTROLS.md) and the [AgentCore Lambda adapter guide](docs/AGENTCORE_LAMBDA_ADAPTER.md).
 
 ## 11. Project status
 
@@ -238,8 +239,9 @@ The local deterministic core, audit journal, R8 reservation lifecycle, R9 simula
 | R8 risk budget | Implemented with request-bound reserve/settle/release lifecycle, audit events and concurrent local tests; durable AWS persistence not implemented |
 | R9 tripwires | Implemented with decoy detection and in-memory incident/session revocation adapter; real AgentCore revocation not implemented |
 | DecisionService | Implemented; validates requests and trusted context before policy evaluation |
-| Audit journal | Local JSONL + SHA-256 hash chain, safe for several writers on one host; records decisions only (not execution or recovery events); external durable storage not implemented |
-| AgentCore agent and Gateway integration | Not implemented |
+| Audit journal | Local JSONL + SHA-256 hash chain with per-file thread/process locking; records decisions only (not execution or recovery events); external durable storage not implemented |
+| AgentCore Lambda adapter | Implemented locally with flat-event parsing, injected identity resolution, fail-closed responses, and existing Core/Gateway delegation; no deployed Gateway or concrete identity resolver |
+| AgentCore agent and Gateway deployment | Not implemented |
 | Human approval workflow | Implemented locally: request-bound, expiring, single-use token delivered to a human channel only, capped open approvals, expired ones swept; external identity provider, real channel and durable store pending |
 | Execution Gateway | Implemented locally with fail-closed routing and simulated AWS executor; real AWS executor and IAM adapter pending |
 | Execution recovery | In-memory journal with conservative recovery; unresolved `UNKNOWN` outcomes need an operator tool; durable journal pending |

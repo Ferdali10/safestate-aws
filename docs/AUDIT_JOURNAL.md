@@ -52,6 +52,21 @@ an independent operational channel.
 link, JSON validity, and an incomplete final line. It detects ordinary edits,
 record deletion, and reordering.
 
+## Concurrent writers
+
+`JsonlAuditSink` serializes each append transaction per canonical journal path.
+The transaction includes reading the previous record hash, computing the new
+hash, and appending the JSONL record. A process-wide per-path thread lock
+coordinates independent sink instances in one process. A sidecar lock provides
+cross-process coordination: POSIX uses `flock`, and Windows uses an `msvcrt`
+byte-range lock. `verify()` takes the same per-path lock so it does not inspect a
+file while a writer is appending. Different journal paths use independent locks.
+
+This preserves the existing record schema and SHA-256 calculation. The lock
+files are coordination artifacts; they are not journal records and do not
+change the chain format. The locks are advisory and depend on the underlying
+filesystem honoring the operating system's locking semantics.
+
 ## Security limitations
 
 A local SHA-256 chain is tamper-evident, not tamper-proof. An attacker who can
@@ -59,6 +74,6 @@ rewrite the entire journal can recompute the chain. Stronger guarantees require
 an independently protected checkpoint, digital signatures, remote append-only
 storage, or WORM retention. Those are deliberately outside this local MVP.
 
-The current implementation uses a process-local lock. Multiple independent
-processes writing the same journal need an OS-level file lock or a single-writer
-service before production use.
+This local implementation is not a durable multi-host audit service. Production
+still requires an appropriately durable append-only store, operational
+monitoring, protected checkpoints, and testing against the target filesystem.

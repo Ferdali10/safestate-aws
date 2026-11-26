@@ -8,19 +8,43 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import errno
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import threading
+import time
 from typing import Any, Callable, Mapping, Protocol
+from weakref import WeakValueDictionary
 
 from .models import Decision, DecisionStatus
 
-try:  # POSIX advisory lock so several processes can append to one journal safely
+try:  # POSIX advisory lock for cross-process coordination.
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX platforms
     fcntl = None  # type: ignore[assignment]
+
+try:  # Windows byte-range lock for cross-process coordination.
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX platforms
+    msvcrt = None  # type: ignore[assignment]
+
+
+_PATH_LOCKS: WeakValueDictionary[str, threading.RLock] = WeakValueDictionary()
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _thread_lock_for(file_identity: tuple[int, int]) -> threading.RLock:
+    """Return one process-wide lock for a physical journal file."""
+    key = f"{file_identity[0]}:{file_identity[1]}"
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[key] = lock
+        return lock
 
 GENESIS_HASH = "0" * 64
 SCHEMA_VERSION = 1
@@ -100,43 +124,84 @@ def _event_hash(record: Mapping[str, Any]) -> str:
 
 
 class _ExclusiveFileLock:
-    """Cross-process exclusive lock held for the duration of one append."""
+    """Lock the journal file itself across aliases, threads, and processes."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, create: bool = True) -> None:
         self._path = path
+        self._create = create
+        self._thread_lock = None
         self._handle = None
 
     def __enter__(self) -> "_ExclusiveFileLock":
-        if fcntl is None:  # pragma: no cover - the in-process lock still applies
-            return self
-        self._handle = open(self._path, "a+b")
-        fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+        try:
+            self._handle = open(self._path, "a+b" if self._create else "r+b")
+            stat = os.fstat(self._handle.fileno())
+            identity = (stat.st_dev, stat.st_ino)
+            if not stat.st_ino:
+                raise RuntimeError("journal filesystem does not expose a stable file identity")
+            self._thread_lock = _thread_lock_for(identity)
+            self._thread_lock.acquire()
+            if fcntl is not None:
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:  # pragma: no branch - selected by platform
+                # Lock one stable byte in the journal. LK_NBLCK lets us wait
+                # indefinitely instead of failing after LK_LOCK's retry cap.
+                while True:
+                    self._handle.seek(0)
+                    try:
+                        msvcrt.locking(self._handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as exc:
+                        if exc.errno not in {errno.EACCES, errno.EDEADLK}:
+                            raise
+                        time.sleep(0.01)
+            else:  # pragma: no cover - unsupported platform
+                raise RuntimeError("no supported inter-process file locking API")
+            current = os.stat(self._path)
+            if (current.st_dev, current.st_ino) != identity:
+                raise RuntimeError("journal path changed during lock acquisition")
+        except Exception:
+            if self._handle is not None:
+                self._handle.close()
+                self._handle = None
+            if self._thread_lock is not None:
+                self._thread_lock.release()
+                self._thread_lock = None
+            raise
         return self
 
     def __exit__(self, *exc_info: object) -> None:
-        if self._handle is not None:
-            try:
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-            finally:
+        try:
+            if self._handle is not None:
+                if fcntl is not None:
+                    fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+                elif msvcrt is not None:  # pragma: no branch - selected by platform
+                    self._handle.seek(0)
+                    msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            if self._handle is not None:
                 self._handle.close()
                 self._handle = None
+            if self._thread_lock is not None:
+                self._thread_lock.release()
+                self._thread_lock = None
 
 
 class JsonlAuditSink:
     """Append-only JSONL writer with a SHA-256 hash chain.
 
-    Appends are serialized across threads (a lock) and across processes or sink
-    instances sharing the file (an exclusive flock on a sidecar .lock file), so
-    concurrent writers extend one chain instead of forking it. The full journal
-    is verified on the first append of each sink instance; later appends read
-    and check only the last record, so cost does not grow with journal size.
-    Call verify() periodically to re-check the whole chain.
+    Appends are serialized on the journal file itself across sink instances,
+    path aliases, threads, and processes (flock on POSIX, a byte-range lock on
+    Windows). Hard links therefore coordinate on the same file identity. The
+    full journal is verified before every append, so corruption of an earlier
+    record cannot be extended by a sink that has already written to the file.
+    Append and verification cost grow with journal size; use a durable indexed
+    audit store if that is too costly.
     """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
-        self._verified = False
 
     def append(self, record: Mapping[str, Any]) -> None:
         required = (
@@ -158,38 +223,35 @@ class JsonlAuditSink:
         payload["schema_version"] = SCHEMA_VERSION
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock, self._file_lock():
+        with self._lock, self._file_lock() as journal:
             previous_hash = GENESIS_HASH
             if self.path.exists() and self.path.stat().st_size:
-                if not self._verified:
-                    result = self.verify()
-                    if not result.valid:
-                        raise ValueError(
-                            f"existing audit journal is invalid: {result.error}"
-                        )
-                    self._verified = True
-                previous_hash = self._last_valid_hash()
+                result = self._verify_unlocked(journal._handle)
+                if not result.valid:
+                    raise ValueError(
+                        f"existing audit journal is invalid: {result.error}"
+                    )
+                previous_hash = self._last_valid_hash(journal._handle)
             payload["previous_hash"] = previous_hash
             payload["event_hash"] = _event_hash(payload)
             encoded = json.dumps(
                 payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
             )
-            with self.path.open("a", encoding="utf-8", newline="\n") as target:
-                target.write(encoded + "\n")
-                target.flush()
-                os.fsync(target.fileno())
+            journal._handle.seek(0, os.SEEK_END)
+            journal._handle.write((encoded + "\n").encode("utf-8"))
+            journal._handle.flush()
+            os.fsync(journal._handle.fileno())
 
     def _file_lock(self):
-        return _ExclusiveFileLock(self.path.with_name(self.path.name + ".lock"))
+        return _ExclusiveFileLock(self.path)
 
-    def _last_valid_hash(self) -> str:
+    def _last_valid_hash(self, journal_file) -> str:
         """Read the final record and check that it is complete and self-consistent."""
-        with self.path.open("rb") as source:
-            source.seek(0, os.SEEK_END)
-            size = source.tell()
-            window = min(size, 65536)
-            source.seek(size - window)
-            tail = source.read()
+        journal_file.seek(0, os.SEEK_END)
+        size = journal_file.tell()
+        window = min(size, 65536)
+        journal_file.seek(size - window)
+        tail = journal_file.read()
         if not tail.endswith(b"\n"):
             raise ValueError("existing audit journal is invalid: incomplete final record")
         lines = tail.splitlines()
@@ -205,44 +267,52 @@ class JsonlAuditSink:
 
     def verify(self) -> VerificationResult:
         """Verify every record, hash, schema and chain link in the journal."""
+        # Preserve the no-side-effect result for a missing journal. This check
+        # can be linearized before a concurrent first append.
         if not self.path.exists():
             return VerificationResult(True, 0)
+        with _ExclusiveFileLock(self.path, create=False) as journal:
+            return self._verify_unlocked(journal._handle)
+
+    def _verify_unlocked(self, journal_file) -> VerificationResult:
+        """Verify the locked journal handle without opening a second handle."""
         previous_hash = GENESIS_HASH
         checked = 0
         try:
-            with self.path.open("r", encoding="utf-8") as source:
-                for line_number, line in enumerate(source, start=1):
-                    if not line.endswith("\n"):
-                        return VerificationResult(
-                            False, checked, "incomplete final record", line_number
-                        )
-                    if not line.strip():
-                        return VerificationResult(
-                            False, checked, "blank journal line", line_number
-                        )
-                    record = json.loads(line)
-                    if not isinstance(record, dict):
-                        raise ValueError("record must be a JSON object")
-                    if record.get("schema_version") != SCHEMA_VERSION:
-                        raise ValueError("unsupported schema version")
-                    if any(
-                        not isinstance(record.get(key), str) or not record[key]
-                        for key in _HASH_FIELDS
-                        if key not in {"schema_version", "previous_hash"}
-                    ):
-                        raise ValueError("record contains missing or invalid fields")
-                    timestamp = datetime.fromisoformat(record["timestamp"])
-                    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-                        raise ValueError("record timestamp is not timezone-aware")
-                    if record.get("previous_hash") != previous_hash:
-                        raise ValueError("hash-chain link mismatch")
-                    expected = _event_hash(record)
-                    if record.get("event_hash") != expected:
-                        raise ValueError("event hash mismatch")
-                    if record.get("status") not in {status.value for status in DecisionStatus}:
-                        raise ValueError("record contains an invalid decision status")
-                    previous_hash = expected
-                    checked += 1
+            journal_file.seek(0)
+            source = io.StringIO(journal_file.read().decode("utf-8"))
+            for line_number, line in enumerate(source, start=1):
+                if not line.endswith("\n"):
+                    return VerificationResult(
+                        False, checked, "incomplete final record", line_number
+                    )
+                if not line.strip():
+                    return VerificationResult(
+                        False, checked, "blank journal line", line_number
+                    )
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError("record must be a JSON object")
+                if record.get("schema_version") != SCHEMA_VERSION:
+                    raise ValueError("unsupported schema version")
+                if any(
+                    not isinstance(record.get(key), str) or not record[key]
+                    for key in _HASH_FIELDS
+                    if key not in {"schema_version", "previous_hash"}
+                ):
+                    raise ValueError("record contains missing or invalid fields")
+                timestamp = datetime.fromisoformat(record["timestamp"])
+                if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                    raise ValueError("record timestamp is not timezone-aware")
+                if record.get("previous_hash") != previous_hash:
+                    raise ValueError("hash-chain link mismatch")
+                expected = _event_hash(record)
+                if record.get("event_hash") != expected:
+                    raise ValueError("event hash mismatch")
+                if record.get("status") not in {status.value for status in DecisionStatus}:
+                    raise ValueError("record contains an invalid decision status")
+                previous_hash = expected
+                checked += 1
         except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             return VerificationResult(False, checked, str(exc), checked + 1)
         return VerificationResult(True, checked)

@@ -1,5 +1,8 @@
 from datetime import datetime, timezone
 import json
+import multiprocessing
+import os
+import threading
 
 import pytest
 
@@ -30,6 +33,42 @@ def make_decision(status=DecisionStatus.ALLOW):
 
 def make_record(event_id="evt-001"):
     return AuditEvent.from_decision(make_decision(), event_id).to_record()
+
+
+def _append_records_in_process(path, offset, start_barrier):
+    """Spawn-safe worker for cross-process file-lock coverage."""
+    sink = JsonlAuditSink(path)
+    start_barrier.wait(timeout=20)
+    for index in range(20):
+        value = offset * 1000 + index
+        sink.append({
+            "event_id": f"process-{value}",
+            "timestamp": "2026-11-25T12:00:00+00:00",
+            "request_id": f"r{value}",
+            "decision_id": f"d{value}",
+            "status": "ALLOW",
+            "rule_id": "R1",
+            "reason_code": "X",
+            "policy_version": "v",
+        })
+
+
+def test_verify_missing_journal_does_not_create_files(tmp_path):
+    path = tmp_path / "not-created" / "journal.jsonl"
+    result = JsonlAuditSink(path).verify()
+    assert result.valid and result.records_checked == 0
+    assert not path.exists()
+    assert not path.with_name(path.name + ".lock").exists()
+
+
+def test_append_to_empty_existing_journal_uses_genesis_hash(tmp_path):
+    path = tmp_path / "journal.jsonl"
+    path.touch()
+    sink = JsonlAuditSink(path)
+    sink.append(make_record("after-empty"))
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["previous_hash"] == GENESIS_HASH
+    assert sink.verify().valid
 
 
 def test_append_creates_jsonl_record_with_genesis_hash(tmp_path):
@@ -165,13 +204,13 @@ def test_approval_decision_is_audited_without_changing_status():
 
 
 def test_many_writers_on_one_file_keep_a_single_valid_chain(tmp_path):
-    import threading
-
     path = tmp_path / "shared.jsonl"
     sinks = [JsonlAuditSink(path) for _ in range(4)]  # like four Lambda instances
     errors = []
+    start = threading.Barrier(len(sinks))
 
     def work(sink, offset):
+        start.wait()
         for i in range(40):
             n = offset * 1000 + i
             try:
@@ -189,8 +228,110 @@ def test_many_writers_on_one_file_keep_a_single_valid_chain(tmp_path):
     for thread in threads:
         thread.join()
     result = sinks[0].verify()
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert errors == []
     assert result.valid and result.records_checked == 160
+    assert len(records) == 160
+    assert {record["event_id"] for record in records} == {
+        f"e{offset * 1000 + i}" for offset in range(4) for i in range(40)
+    }
+
+
+def test_concurrent_writers_on_different_files_keep_independent_chains(tmp_path):
+    sinks = [JsonlAuditSink(tmp_path / f"journal-{index}.jsonl") for index in range(4)]
+    errors = []
+    start = threading.Barrier(len(sinks))
+
+    def work(sink, offset):
+        start.wait()
+        for i in range(40):
+            n = offset * 1000 + i
+            try:
+                sink.append({
+                    "event_id": f"e{n}", "timestamp": "2026-11-25T12:00:00+00:00",
+                    "request_id": f"r{n}", "decision_id": f"d{n}", "status": "ALLOW",
+                    "rule_id": "R1", "reason_code": "X", "policy_version": "v",
+                })
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(sink, index))
+               for index, sink in enumerate(sinks)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    for index, sink in enumerate(sinks):
+        result = sink.verify()
+        records = [json.loads(line) for line in sink.path.read_text(encoding="utf-8").splitlines()]
+        assert result.valid and result.records_checked == 40
+        assert len(records) == 40
+        assert {record["event_id"] for record in records} == {
+            f"e{index * 1000 + i}" for i in range(40)
+        }
+
+
+def test_cross_process_writers_keep_one_valid_chain(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    path = tmp_path / "process-shared.jsonl"
+    start = context.Barrier(4)
+    processes = [
+        context.Process(target=_append_records_in_process, args=(str(path), n, start))
+        for n in range(4)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+            process.join()
+    assert [process.exitcode for process in processes] == [0, 0, 0, 0]
+
+    sink = JsonlAuditSink(path)
+    result = sink.verify()
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert result.valid and result.records_checked == 80
+    assert len(records) == 80
+    assert len({record["event_id"] for record in records}) == 80
+
+
+def test_hard_link_writers_share_one_valid_chain(tmp_path):
+    path = tmp_path / "hard-linked.jsonl"
+    alias = tmp_path / "hard-linked-alias.jsonl"
+    path.touch()
+    try:
+        os.link(path, alias)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"hard links are unavailable on this filesystem: {exc}")
+    assert os.stat(path).st_ino == os.stat(alias).st_ino
+
+    context = multiprocessing.get_context("spawn")
+    start = context.Barrier(2)
+    processes = [
+        context.Process(target=_append_records_in_process, args=(str(target), offset, start))
+        for offset, target in enumerate((path, alias))
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+            process.join()
+    assert [process.exitcode for process in processes] == [0, 0]
+
+    result = JsonlAuditSink(path).verify()
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert result.valid and result.records_checked == 40
+    assert len(records) == 40
+    assert {record["event_id"] for record in records} == {
+        f"process-{offset * 1000 + i}" for offset in range(2) for i in range(20)
+    }
 
 
 def test_append_detects_tampering_of_the_last_record(tmp_path):
@@ -206,3 +347,51 @@ def test_append_detects_tampering_of_the_last_record(tmp_path):
     fresh = JsonlAuditSink(path)
     with pytest.raises(ValueError):
         fresh.append({**record, "event_id": "e2"})
+
+
+def test_same_sink_rejects_tampering_of_an_earlier_record(tmp_path):
+    path = tmp_path / "earlier-tamper.jsonl"
+    sink = JsonlAuditSink(path)
+    first = make_record("first")
+    sink.append(first)
+    sink.append(make_record("second"))
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    tampered = json.loads(lines[0])
+    tampered["status"] = "BLOCK"
+    lines[0] = json.dumps(tampered)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="existing audit journal is invalid"):
+        sink.append(make_record("third"))
+
+
+def test_lock_is_released_after_append_exception(tmp_path, monkeypatch):
+    from safestate_core import audit as audit_module
+
+    path = tmp_path / "lock-release.jsonl"
+    sink = JsonlAuditSink(path)
+
+    def fail_hash(_record):
+        raise RuntimeError("injected hash failure")
+
+    monkeypatch.setattr(audit_module, "_event_hash", fail_hash)
+    with pytest.raises(RuntimeError, match="injected hash failure"):
+        sink.append(make_record("failed"))
+    monkeypatch.undo()
+
+    errors = []
+
+    def append_after_failure():
+        try:
+            JsonlAuditSink(path).append(make_record("recovered"))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    writer = threading.Thread(target=append_after_failure)
+    writer.start()
+    writer.join(timeout=5)
+    assert not writer.is_alive(), "file lock remained held after failed append"
+    assert errors == []
+    result = sink.verify()
+    assert result.valid and result.records_checked == 1

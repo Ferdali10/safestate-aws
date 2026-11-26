@@ -1,0 +1,24 @@
+{
+  "name": "SafeStateStrands",
+  "version": 2,
+  "managedBy": "CDK",
+  "runtimes": [
+    {
+      "name": "SafeStateStrands",
+      "build": "CodeZip",
+      "entrypoint": "main.py",
+      "codeLocation": "integrations/strands",
+      "runtimeVersion": "PYTHON_3_10",
+      "protocol": "HTTP"
+    }
+  ],
+  "memories": [],
+  "knowledgeBases": [],
+  "credentials": [],
+  "evaluators": [],
+  "onlineEvalConfigs": [],
+  "agentCoreGateways": [],
+  "policyEngines": [],
+  "configBundles": [],
+  "harnesses": []
+}

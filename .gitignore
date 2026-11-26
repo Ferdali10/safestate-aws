@@ -22,6 +22,9 @@ venv/
 *.tfstate
 *.tfstate.*
 
+# AgentCore build artifacts
+agentcore/.cache/
+
 # Editors and OS
 .vscode/
 .idea/

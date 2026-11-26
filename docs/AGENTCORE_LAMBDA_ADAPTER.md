@@ -135,12 +135,13 @@ Production wiring still needs to provide and review:
 
 ## Audit journal concurrency
 
-The local `JsonlAuditSink` serializes operations per journal path. A shared
-in-process lock coordinates sink instances, while a sidecar lock coordinates
-processes (`flock` on POSIX and a byte-range lock through `msvcrt` on Windows).
-The lock covers reading the previous hash, calculating the next record hash,
-and appending the JSONL record. `verify()` uses the same path lock to avoid
-reading a concurrent append. Different journal paths use independent locks.
+The local `JsonlAuditSink` serializes operations on the journal file itself.
+Thread locks use the file's `(st_dev, st_ino)` identity; process locks use
+`flock` on POSIX and a byte-range lock through `msvcrt` on Windows. Thus,
+different path names for the same physical file, including hard links, share
+the lock. The lock covers reading the previous hash, calculating the next
+record hash, and appending through the locked file handle. `verify()` uses the
+same file lock. Different journal files use independent locks.
 
 The SHA-256 chain format is unchanged. OS file locks are advisory and rely on
 the underlying filesystem honoring their semantics. The journal is local and

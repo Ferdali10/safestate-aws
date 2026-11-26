@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import json
 import multiprocessing
+import os
 import threading
 
 import pytest
@@ -296,6 +297,41 @@ def test_cross_process_writers_keep_one_valid_chain(tmp_path):
     assert result.valid and result.records_checked == 80
     assert len(records) == 80
     assert len({record["event_id"] for record in records}) == 80
+
+
+def test_hard_link_writers_share_one_valid_chain(tmp_path):
+    path = tmp_path / "hard-linked.jsonl"
+    alias = tmp_path / "hard-linked-alias.jsonl"
+    path.touch()
+    try:
+        os.link(path, alias)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"hard links are unavailable on this filesystem: {exc}")
+    assert os.stat(path).st_ino == os.stat(alias).st_ino
+
+    context = multiprocessing.get_context("spawn")
+    start = context.Barrier(2)
+    processes = [
+        context.Process(target=_append_records_in_process, args=(str(target), offset, start))
+        for offset, target in enumerate((path, alias))
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+            process.join()
+    assert [process.exitcode for process in processes] == [0, 0]
+
+    result = JsonlAuditSink(path).verify()
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert result.valid and result.records_checked == 40
+    assert len(records) == 40
+    assert {record["event_id"] for record in records} == {
+        f"process-{offset * 1000 + i}" for offset in range(2) for i in range(20)
+    }
 
 
 def test_append_detects_tampering_of_the_last_record(tmp_path):

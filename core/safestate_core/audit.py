@@ -35,9 +35,9 @@ _PATH_LOCKS: WeakValueDictionary[str, threading.RLock] = WeakValueDictionary()
 _PATH_LOCKS_GUARD = threading.Lock()
 
 
-def _thread_lock_for(path: Path) -> threading.RLock:
-    """Return one process-wide lock for a canonical journal path."""
-    key = os.path.normcase(str(path.resolve()))
+def _thread_lock_for(file_identity: tuple[int, int]) -> threading.RLock:
+    """Return one process-wide lock for a physical journal file."""
+    key = f"{file_identity[0]}:{file_identity[1]}"
     with _PATH_LOCKS_GUARD:
         lock = _PATH_LOCKS.get(key)
         if lock is None:
@@ -123,26 +123,28 @@ def _event_hash(record: Mapping[str, Any]) -> str:
 
 
 class _ExclusiveFileLock:
-    """Per-path thread and process lock held across a journal transaction."""
+    """Lock the journal file itself across aliases, threads, and processes."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, create: bool = True) -> None:
         self._path = path
-        self._thread_lock = _thread_lock_for(path)
+        self._create = create
+        self._thread_lock = None
         self._handle = None
 
     def __enter__(self) -> "_ExclusiveFileLock":
-        self._thread_lock.acquire()
         try:
-            self._handle = open(self._path, "a+b")
+            self._handle = open(self._path, "a+b" if self._create else "r+b")
+            stat = os.fstat(self._handle.fileno())
+            identity = (stat.st_dev, stat.st_ino)
+            if not stat.st_ino:
+                raise RuntimeError("journal filesystem does not expose a stable file identity")
+            self._thread_lock = _thread_lock_for(identity)
+            self._thread_lock.acquire()
             if fcntl is not None:
                 fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
             elif msvcrt is not None:  # pragma: no branch - selected by platform
-                # Lock one stable byte in the sidecar. LK_NBLCK lets us wait
+                # Lock one stable byte in the journal. LK_NBLCK lets us wait
                 # indefinitely instead of failing after LK_LOCK's retry cap.
-                self._handle.seek(0, os.SEEK_END)
-                if self._handle.tell() == 0:
-                    self._handle.write(b"\0")
-                    self._handle.flush()
                 while True:
                     self._handle.seek(0)
                     try:
@@ -158,7 +160,9 @@ class _ExclusiveFileLock:
             if self._handle is not None:
                 self._handle.close()
                 self._handle = None
-            self._thread_lock.release()
+            if self._thread_lock is not None:
+                self._thread_lock.release()
+                self._thread_lock = None
             raise
         return self
 
@@ -174,19 +178,21 @@ class _ExclusiveFileLock:
             if self._handle is not None:
                 self._handle.close()
                 self._handle = None
-            self._thread_lock.release()
+            if self._thread_lock is not None:
+                self._thread_lock.release()
+                self._thread_lock = None
 
 
 class JsonlAuditSink:
     """Append-only JSONL writer with a SHA-256 hash chain.
 
-    Appends are serialized across sink instances in one process and across
-    processes using a per-path thread lock plus the platform's sidecar lock
-    (flock on POSIX, a byte-range lock on Windows), so concurrent writers extend
-    one chain instead of forking it. The full journal is verified before every
-    append, so corruption of an earlier record cannot be extended by a sink
-    that has already written to the file. Append and verification cost grow
-    with journal size; use a durable indexed audit store if that is too costly.
+    Appends are serialized on the journal file itself across sink instances,
+    path aliases, threads, and processes (flock on POSIX, a byte-range lock on
+    Windows). Hard links therefore coordinate on the same file identity. The
+    full journal is verified before every append, so corruption of an earlier
+    record cannot be extended by a sink that has already written to the file.
+    Append and verification cost grow with journal size; use a durable indexed
+    audit store if that is too costly.
     """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
@@ -213,7 +219,7 @@ class JsonlAuditSink:
         payload["schema_version"] = SCHEMA_VERSION
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock, self._file_lock():
+        with self._lock, self._file_lock() as journal:
             previous_hash = GENESIS_HASH
             if self.path.exists() and self.path.stat().st_size:
                 result = self._verify_unlocked()
@@ -227,16 +233,13 @@ class JsonlAuditSink:
             encoded = json.dumps(
                 payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
             )
-            with self.path.open("a", encoding="utf-8", newline="\n") as target:
-                target.write(encoded + "\n")
-                target.flush()
-                os.fsync(target.fileno())
+            journal._handle.seek(0, os.SEEK_END)
+            journal._handle.write((encoded + "\n").encode("utf-8"))
+            journal._handle.flush()
+            os.fsync(journal._handle.fileno())
 
     def _file_lock(self):
-        # Resolve aliases so symlinked spellings of a journal coordinate on
-        # the same sidecar as well as the same in-process lock.
-        canonical = self.path.resolve()
-        return _ExclusiveFileLock(canonical.with_name(canonical.name + ".lock"))
+        return _ExclusiveFileLock(self.path)
 
     def _last_valid_hash(self) -> str:
         """Read the final record and check that it is complete and self-consistent."""
@@ -265,7 +268,7 @@ class JsonlAuditSink:
         # can be linearized before a concurrent first append.
         if not self.path.exists():
             return VerificationResult(True, 0)
-        with self._file_lock():
+        with _ExclusiveFileLock(self.path, create=False):
             return self._verify_unlocked()
 
     def _verify_unlocked(self) -> VerificationResult:

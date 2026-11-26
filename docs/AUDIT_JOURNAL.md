@@ -54,22 +54,22 @@ record deletion, and reordering.
 
 ## Concurrent writers
 
-`JsonlAuditSink` serializes each append transaction per canonical journal path.
+`JsonlAuditSink` serializes each append transaction on the journal file itself.
 The transaction includes reading the previous record hash, computing the new
-hash, and appending the JSONL record. A process-wide per-path thread lock
-coordinates independent sink instances in one process. A sidecar lock provides
-cross-process coordination: POSIX uses `flock`, and Windows uses an `msvcrt`
-byte-range lock. `verify()` takes the same per-path lock so it does not inspect a
-file while a writer is appending. Different journal paths use independent locks.
+hash, and appending the JSONL record through the locked file handle. A
+process-wide thread lock is keyed by the file's `(st_dev, st_ino)` identity;
+POSIX `flock` and the Windows `msvcrt` byte-range lock protect the same file
+across processes. This coordinates path aliases, including hard links.
+`verify()` takes the same file lock so it does not inspect a concurrent append.
+Different journal files use independent locks. No sidecar lock file is needed.
 
-This preserves the existing record schema and SHA-256 calculation. The lock
-files are coordination artifacts; they are not journal records and do not
-change the chain format. The locks are advisory and depend on the underlying
-filesystem honoring the operating system's locking semantics. Symlink aliases
-are resolved to a common sidecar path. Appends verify the full existing chain
-before extending it, including records written earlier by the same sink. This
-detects prior tampering but makes each append O(n) in journal length; use a
-durable indexed audit store for larger journals.
+This preserves the existing record schema and SHA-256 calculation. The locks
+are advisory and depend on the underlying filesystem honoring the operating
+system's locking semantics and exposing stable device/inode identifiers.
+Appends verify the full existing chain before extending it, including records
+written earlier by the same sink. This detects prior tampering but makes each
+append O(n) in journal length; use a durable indexed audit store for larger
+journals.
 
 ## Security limitations
 

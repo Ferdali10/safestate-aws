@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import errno
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -156,6 +157,9 @@ class _ExclusiveFileLock:
                         time.sleep(0.01)
             else:  # pragma: no cover - unsupported platform
                 raise RuntimeError("no supported inter-process file locking API")
+            current = os.stat(self._path)
+            if (current.st_dev, current.st_ino) != identity:
+                raise RuntimeError("journal path changed during lock acquisition")
         except Exception:
             if self._handle is not None:
                 self._handle.close()
@@ -222,12 +226,12 @@ class JsonlAuditSink:
         with self._lock, self._file_lock() as journal:
             previous_hash = GENESIS_HASH
             if self.path.exists() and self.path.stat().st_size:
-                result = self._verify_unlocked()
+                result = self._verify_unlocked(journal._handle)
                 if not result.valid:
                     raise ValueError(
                         f"existing audit journal is invalid: {result.error}"
                     )
-                previous_hash = self._last_valid_hash()
+                previous_hash = self._last_valid_hash(journal._handle)
             payload["previous_hash"] = previous_hash
             payload["event_hash"] = _event_hash(payload)
             encoded = json.dumps(
@@ -241,14 +245,13 @@ class JsonlAuditSink:
     def _file_lock(self):
         return _ExclusiveFileLock(self.path)
 
-    def _last_valid_hash(self) -> str:
+    def _last_valid_hash(self, journal_file) -> str:
         """Read the final record and check that it is complete and self-consistent."""
-        with self.path.open("rb") as source:
-            source.seek(0, os.SEEK_END)
-            size = source.tell()
-            window = min(size, 65536)
-            source.seek(size - window)
-            tail = source.read()
+        journal_file.seek(0, os.SEEK_END)
+        size = journal_file.tell()
+        window = min(size, 65536)
+        journal_file.seek(size - window)
+        tail = journal_file.read()
         if not tail.endswith(b"\n"):
             raise ValueError("existing audit journal is invalid: incomplete final record")
         lines = tail.splitlines()
@@ -268,49 +271,48 @@ class JsonlAuditSink:
         # can be linearized before a concurrent first append.
         if not self.path.exists():
             return VerificationResult(True, 0)
-        with _ExclusiveFileLock(self.path, create=False):
-            return self._verify_unlocked()
+        with _ExclusiveFileLock(self.path, create=False) as journal:
+            return self._verify_unlocked(journal._handle)
 
-    def _verify_unlocked(self) -> VerificationResult:
-        """Verify the journal while the caller holds its per-path lock."""
-        if not self.path.exists():
-            return VerificationResult(True, 0)
+    def _verify_unlocked(self, journal_file) -> VerificationResult:
+        """Verify the locked journal handle without opening a second handle."""
         previous_hash = GENESIS_HASH
         checked = 0
         try:
-            with self.path.open("r", encoding="utf-8") as source:
-                for line_number, line in enumerate(source, start=1):
-                    if not line.endswith("\n"):
-                        return VerificationResult(
-                            False, checked, "incomplete final record", line_number
-                        )
-                    if not line.strip():
-                        return VerificationResult(
-                            False, checked, "blank journal line", line_number
-                        )
-                    record = json.loads(line)
-                    if not isinstance(record, dict):
-                        raise ValueError("record must be a JSON object")
-                    if record.get("schema_version") != SCHEMA_VERSION:
-                        raise ValueError("unsupported schema version")
-                    if any(
-                        not isinstance(record.get(key), str) or not record[key]
-                        for key in _HASH_FIELDS
-                        if key not in {"schema_version", "previous_hash"}
-                    ):
-                        raise ValueError("record contains missing or invalid fields")
-                    timestamp = datetime.fromisoformat(record["timestamp"])
-                    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-                        raise ValueError("record timestamp is not timezone-aware")
-                    if record.get("previous_hash") != previous_hash:
-                        raise ValueError("hash-chain link mismatch")
-                    expected = _event_hash(record)
-                    if record.get("event_hash") != expected:
-                        raise ValueError("event hash mismatch")
-                    if record.get("status") not in {status.value for status in DecisionStatus}:
-                        raise ValueError("record contains an invalid decision status")
-                    previous_hash = expected
-                    checked += 1
+            journal_file.seek(0)
+            source = io.StringIO(journal_file.read().decode("utf-8"))
+            for line_number, line in enumerate(source, start=1):
+                if not line.endswith("\n"):
+                    return VerificationResult(
+                        False, checked, "incomplete final record", line_number
+                    )
+                if not line.strip():
+                    return VerificationResult(
+                        False, checked, "blank journal line", line_number
+                    )
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError("record must be a JSON object")
+                if record.get("schema_version") != SCHEMA_VERSION:
+                    raise ValueError("unsupported schema version")
+                if any(
+                    not isinstance(record.get(key), str) or not record[key]
+                    for key in _HASH_FIELDS
+                    if key not in {"schema_version", "previous_hash"}
+                ):
+                    raise ValueError("record contains missing or invalid fields")
+                timestamp = datetime.fromisoformat(record["timestamp"])
+                if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+                    raise ValueError("record timestamp is not timezone-aware")
+                if record.get("previous_hash") != previous_hash:
+                    raise ValueError("hash-chain link mismatch")
+                expected = _event_hash(record)
+                if record.get("event_hash") != expected:
+                    raise ValueError("event hash mismatch")
+                if record.get("status") not in {status.value for status in DecisionStatus}:
+                    raise ValueError("record contains an invalid decision status")
+                previous_hash = expected
+                checked += 1
         except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             return VerificationResult(False, checked, str(exc), checked + 1)
         return VerificationResult(True, checked)

@@ -65,7 +65,11 @@ file while a writer is appending. Different journal paths use independent locks.
 This preserves the existing record schema and SHA-256 calculation. The lock
 files are coordination artifacts; they are not journal records and do not
 change the chain format. The locks are advisory and depend on the underlying
-filesystem honoring the operating system's locking semantics.
+filesystem honoring the operating system's locking semantics. Symlink aliases
+are resolved to a common sidecar path. Appends verify the full existing chain
+before extending it, including records written earlier by the same sink. This
+detects prior tampering but makes each append O(n) in journal length; use a
+durable indexed audit store for larger journals.
 
 ## Security limitations
 

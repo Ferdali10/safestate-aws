@@ -16,6 +16,7 @@ from pathlib import Path
 import threading
 import time
 from typing import Any, Callable, Mapping, Protocol
+from weakref import WeakValueDictionary
 
 from .models import Decision, DecisionStatus
 
@@ -30,7 +31,7 @@ except ImportError:  # pragma: no cover - POSIX platforms
     msvcrt = None  # type: ignore[assignment]
 
 
-_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS: WeakValueDictionary[str, threading.RLock] = WeakValueDictionary()
 _PATH_LOCKS_GUARD = threading.Lock()
 
 
@@ -182,16 +183,15 @@ class JsonlAuditSink:
     Appends are serialized across sink instances in one process and across
     processes using a per-path thread lock plus the platform's sidecar lock
     (flock on POSIX, a byte-range lock on Windows), so concurrent writers extend
-    one chain instead of forking it. The full journal
-    is verified on the first append of each sink instance; later appends read
-    and check only the last record, so cost does not grow with journal size.
-    Call verify() periodically to re-check the whole chain.
+    one chain instead of forking it. The full journal is verified before every
+    append, so corruption of an earlier record cannot be extended by a sink
+    that has already written to the file. Append and verification cost grow
+    with journal size; use a durable indexed audit store if that is too costly.
     """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
         self._lock = threading.Lock()
-        self._verified = False
 
     def append(self, record: Mapping[str, Any]) -> None:
         required = (
@@ -216,13 +216,11 @@ class JsonlAuditSink:
         with self._lock, self._file_lock():
             previous_hash = GENESIS_HASH
             if self.path.exists() and self.path.stat().st_size:
-                if not self._verified:
-                    result = self._verify_unlocked()
-                    if not result.valid:
-                        raise ValueError(
-                            f"existing audit journal is invalid: {result.error}"
-                        )
-                    self._verified = True
+                result = self._verify_unlocked()
+                if not result.valid:
+                    raise ValueError(
+                        f"existing audit journal is invalid: {result.error}"
+                    )
                 previous_hash = self._last_valid_hash()
             payload["previous_hash"] = previous_hash
             payload["event_hash"] = _event_hash(payload)
@@ -235,7 +233,10 @@ class JsonlAuditSink:
                 os.fsync(target.fileno())
 
     def _file_lock(self):
-        return _ExclusiveFileLock(self.path.with_name(self.path.name + ".lock"))
+        # Resolve aliases so symlinked spellings of a journal coordinate on
+        # the same sidecar as well as the same in-process lock.
+        canonical = self.path.resolve()
+        return _ExclusiveFileLock(canonical.with_name(canonical.name + ".lock"))
 
     def _last_valid_hash(self) -> str:
         """Read the final record and check that it is complete and self-consistent."""

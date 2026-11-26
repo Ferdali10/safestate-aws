@@ -19,22 +19,26 @@ authenticated agent identity.
 
 This handler therefore reads tool arguments from the flat event mapping. It
 does not accept the former `{ "input": {...} }` wrapper as an alternate
-contract. The tool schema must provide the SafeState request fields:
-`mission_id`, `mission_version`, `action`, `resource_id`, `resource_type`, and
-optional `parameters`. `agent_id`, `request_id`, and `requested_at` from tool
-arguments are discarded. The adapter creates the latter two server-side and
-sets the timestamp in UTC.
+contract. The tool schema should expose only `action`, `resource_id`,
+`resource_type`, and optional `parameters`. Any `agent_id`, `mission_id`,
+`mission_version`, `request_id`, or `requested_at` supplied in the event is
+discarded. The adapter obtains agent and mission assignment from its trusted
+resolver, generates the request ID, and sets the timestamp in UTC.
 
 ## Identity resolver contract
 
-`TrustedIdentityResolver.resolve(event, context)` must return an agent ID only
-after validating it against an independently trusted identity source. The
-handler does not infer identity from tool arguments, tool names, Gateway
-routing metadata, or arbitrary propagated headers. A missing resolver, invalid
-identity, or resolver error blocks before Core decision or execution.
+`TrustedIdentityResolver.resolve(context)` must return a `TrustedRequestContext`
+containing `agent_id`, `mission_id`, and `mission_version` only after validating
+the authenticated principal and its assigned mission against independently
+trusted sources. The handler does not pass the raw event to the resolver and
+does not infer identity or mission assignment from tool arguments, tool names,
+Gateway routing metadata, or arbitrary propagated headers. A missing resolver,
+invalid trusted context, or resolver error blocks before Core decision or
+execution.
 
 No concrete authenticated identity resolver is included. Production wiring
-must explicitly choose and validate an identity mechanism. Gateway header
+must explicitly choose and validate both an identity mechanism and the
+principal-to-mission assignment. Gateway header
 propagation is opt-in through target `metadataConfiguration` allowlists and
 arrives in Lambda client context. Propagation alone does not establish trust:
 the deployment must ensure the value was produced by a trusted authenticator or

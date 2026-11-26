@@ -6,6 +6,7 @@ fields are never an identity source.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
 from uuid import uuid4
@@ -16,14 +17,25 @@ from safestate_core.service import DefaultDecisionService
 from safestate_core.validation import UnknownActionError, ValidationError, parse_request
 
 
-class TrustedIdentityResolver(Protocol):
-    """Resolve identity from an independently verified source.
+@dataclass(frozen=True, slots=True)
+class TrustedRequestContext:
+    """Authenticated agent and assigned mission binding for one invocation."""
 
-    The Gateway event contains tool arguments. Lambda context carries routing
-    metadata; neither is inherently an authenticated agent identity.
+    agent_id: str
+    mission_id: str
+    mission_version: str
+
+
+class TrustedIdentityResolver(Protocol):
+    """Resolve trusted identity and mission binding from Lambda context.
+
+    The event is deliberately not passed to the resolver: tool arguments must
+    not select the authenticated agent or its assigned mission. Lambda context
+    routing metadata is not inherently an authenticated identity either, so the
+    injected implementation must validate a deployment-specific trusted source.
     """
 
-    def resolve(self, event: Mapping[str, Any], context: Any) -> str: ...
+    def resolve(self, context: Any) -> TrustedRequestContext: ...
 
 
 class LambdaHandler:
@@ -49,25 +61,42 @@ class LambdaHandler:
 
         try:
             if self._identity is None:
-                raise ValueError("trusted identity resolver is unavailable")
-            agent_id = self._identity.resolve(event, context)
-            if not isinstance(agent_id, str) or not agent_id.strip():
-                raise ValueError("trusted identity is unavailable")
+                raise ValueError("trusted context resolver is unavailable")
+            trusted = self._identity.resolve(context)
+            if (
+                not isinstance(trusted, TrustedRequestContext)
+                or not isinstance(trusted.agent_id, str)
+                or not trusted.agent_id.strip()
+                or not isinstance(trusted.mission_id, str)
+                or not trusted.mission_id.strip()
+                or not isinstance(trusted.mission_version, str)
+                or not trusted.mission_version.strip()
+            ):
+                raise ValueError("trusted identity or mission binding is unavailable")
         except Exception:  # noqa: BLE001 - identity failure must fail closed
             return self._invalid("TRUSTED_IDENTITY_UNAVAILABLE",
-                                 "Authenticated agent identity could not be established.")
+                                 "Authenticated request context could not be established.")
 
         # AgentCore Gateway Lambda targets pass the tool inputSchema properties
         # directly as the event map. Routing metadata is in Lambda context.
-        # Never treat an `input` wrapper or identity-like tool arguments as
-        # authenticated identity.
+        # Identity and mission assignment come from the resolver only. Ignore
+        # all caller-supplied identity, mission, request ID, and timestamp data.
         payload = dict(event)
         payload.pop("agent_id", None)
+        payload.pop("mission_id", None)
+        payload.pop("mission_version", None)
         payload.pop("request_id", None)
         payload.pop("requested_at", None)
-        payload["agent_id"] = agent_id.strip()
-        payload["request_id"] = self._new_id()
-        now = self._clock()
+        payload["agent_id"] = trusted.agent_id.strip()
+        payload["mission_id"] = trusted.mission_id.strip()
+        payload["mission_version"] = trusted.mission_version.strip()
+        try:
+            payload["request_id"] = self._new_id()
+            now = self._clock()
+        except Exception:  # noqa: BLE001 - server context faults fail closed
+            return self._invalid("SERVER_REQUEST_CONTEXT_FAILED", "Server request context is unavailable.")
+        if not isinstance(payload["request_id"], str) or not payload["request_id"].strip():
+            return self._invalid("SERVER_REQUEST_CONTEXT_FAILED", "Server request context is unavailable.")
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             return self._invalid("SERVER_CLOCK_INVALID", "Server clock is not timezone-aware.")
         payload["requested_at"] = now.astimezone(timezone.utc)
@@ -81,13 +110,19 @@ class LambdaHandler:
                 decision = self._decisions.decide_raw(payload)
             except Exception:  # noqa: BLE001 - raw decision faults fail closed
                 return self._invalid("DECISION_SERVICE_FAILURE", "SafeState decision service failed closed.")
-            return self._decision_response(decision)
+            try:
+                return self._decision_response(decision)
+            except Exception:  # noqa: BLE001 - malformed Core results fail closed
+                return self._invalid("DECISION_SERVICE_FAILURE", "SafeState decision service failed closed.")
 
         try:
             result = self._gateway.submit(request)
         except Exception:  # noqa: BLE001 - adapter boundary fails closed
             return self._invalid("GATEWAY_FAILURE", "SafeState gateway failed closed.")
-        return self._gateway_response(result)
+        try:
+            return self._gateway_response(result)
+        except Exception:  # noqa: BLE001 - malformed Gateway results fail closed
+            return self._invalid("GATEWAY_RESPONSE_INVALID", "SafeState gateway failed closed.")
 
     @staticmethod
     def _decision_response(decision: Decision) -> dict[str, Any]:
@@ -106,6 +141,10 @@ class LambdaHandler:
 
     @classmethod
     def _gateway_response(cls, result: GatewayResult) -> dict[str, Any]:
+        if not isinstance(result, GatewayResult) or not isinstance(result.decision, Decision):
+            raise TypeError("gateway returned an invalid result")
+        if result.execution is not None and not isinstance(result.execution, Mapping):
+            raise TypeError("gateway returned an invalid execution result")
         decision = result.decision
         return {
             "outcome": result.outcome,

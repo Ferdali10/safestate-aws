@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from adapters.aws.handler import LambdaHandler
+from adapters.aws.handler import LambdaHandler, TrustedRequestContext
+from safestate_core.execution import GatewayResult
 from safestate_core.models import Decision, DecisionStatus
 
 
@@ -24,12 +25,12 @@ def make_context():
 
 
 class Identity:
-    def __init__(self, value="authenticated-agent"):
+    def __init__(self, value=TrustedRequestContext("authenticated-agent", "trusted-mission", "v1")):
         self.value = value
         self.calls = []
 
-    def resolve(self, event, context):
-        self.calls.append((event, context))
+    def resolve(self, context):
+        self.calls.append(context)
         return self.value
 
 
@@ -71,7 +72,7 @@ class Gateway:
         self.requests.append(request)
         if self.error:
             raise self.error
-        return SimpleNamespace(
+        return GatewayResult(
             outcome=("APPROVAL_REQUIRED" if self.status is DecisionStatus.REQUIRE_APPROVAL else
                      "BLOCKED" if self.status is DecisionStatus.BLOCK else "EXECUTED"),
             decision=decision(request.request_id, self.status),
@@ -87,8 +88,8 @@ def flat_event(**overrides):
         "agent_id": "attacker-controlled",
         "request_id": "attacker-request",
         "requested_at": "2000-01-01T00:00:00Z",
-        "mission_id": "mission-1",
-        "mission_version": "v1",
+        "mission_id": "attacker-mission",
+        "mission_version": "attacker-version",
         "action": "LIST_INSTANCES",
         "resource_id": "*",
         "resource_type": "EC2_INSTANCE",
@@ -112,7 +113,7 @@ def make_handler(*, identity=_DEFAULT_IDENTITY, gateway=None, decisions=None, cl
     return handler, gateway, decisions, identity
 
 
-def test_flat_gateway_event_uses_lambda_context_and_trusted_identity_once():
+def test_flat_gateway_event_uses_only_trusted_context_and_calls_submit_once():
     handler, gateway, decisions, identity = make_handler()
     event = flat_event()
     context = make_context()
@@ -122,15 +123,17 @@ def test_flat_gateway_event_uses_lambda_context_and_trusted_identity_once():
     assert len(gateway.requests) == 1
     request = gateway.requests[0]
     assert request.agent_id == "authenticated-agent"
+    assert request.mission_id == "trusted-mission"
+    assert request.mission_version == "v1"
     assert request.request_id == "server-request-1"
     assert request.requested_at == NOW
     assert request.requested_at.utcoffset().total_seconds() == 0
-    assert identity.calls == [(event, context)]
+    assert identity.calls == [context]
     assert decisions.payloads == []
 
 
 @pytest.mark.parametrize("identity", [None, Identity(""), Identity("  "), Identity(7)])
-def test_absent_or_invalid_identity_fails_closed(identity):
+def test_absent_or_invalid_trusted_context_fails_closed(identity):
     handler, gateway, decisions, _ = make_handler(identity=identity)
     result = handler(flat_event(), make_context())
     assert result["decision"] == "BLOCK"
@@ -139,18 +142,21 @@ def test_absent_or_invalid_identity_fails_closed(identity):
     assert decisions.payloads == []
 
 
-def test_agent_supplied_identity_is_ignored_and_resolver_gets_both_contexts():
+def test_agent_supplied_identity_and_mission_cannot_override_trusted_binding():
     handler, gateway, _, identity = make_handler()
-    event = flat_event(agent_id="forged-agent")
+    event = flat_event(agent_id="forged-agent", mission_id="forged-mission",
+                       mission_version="forged-version")
     context = make_context()
     handler(event, context)
     assert gateway.requests[0].agent_id == "authenticated-agent"
-    assert identity.calls == [(event, context)]
+    assert gateway.requests[0].mission_id == "trusted-mission"
+    assert gateway.requests[0].mission_version == "v1"
+    assert identity.calls == [context]
 
 
 def test_resolver_exception_fails_closed():
     class BrokenIdentity:
-        def resolve(self, event, context):
+        def resolve(self, context):
             raise RuntimeError("identity source unavailable")
 
     handler, gateway, decisions, _ = make_handler(identity=BrokenIdentity())
@@ -167,6 +173,8 @@ def test_unknown_action_uses_core_raw_path_for_tripwire():
     assert result["reason_code"] == "TRIPWIRE_TRIGGERED"
     assert len(decisions.payloads) == 1
     assert decisions.payloads[0]["agent_id"] == "authenticated-agent"
+    assert decisions.payloads[0]["mission_id"] == "trusted-mission"
+    assert decisions.payloads[0]["mission_version"] == "v1"
     assert gateway.requests == []
 
 

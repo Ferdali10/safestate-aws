@@ -30,8 +30,8 @@ sequenceDiagram
 
     A->>G: Invoke tool with tool arguments
     G->>L: Flat event and separate Lambda context
-    L->>I: resolve(event, context)
-    I-->>L: Verified agent ID or failure
+    L->>I: resolve(context)
+    I-->>L: Verified agent and mission binding or failure
     alt Identity cannot be verified
         L-->>G: Controlled BLOCK response
     else Identity verified
@@ -64,8 +64,8 @@ The adapter reads the flat event. The expected tool arguments are:
 
 | Field | Source | Use |
 |---|---|---|
-| `mission_id` | Tool event | Selects the mission requested for evaluation; the Core verifies it against trusted mission state. |
-| `mission_version` | Tool event | Version binding checked by the Core. |
+| `mission_id` | Trusted identity resolver | Assigned mission; never selected by tool arguments. |
+| `mission_version` | Trusted identity resolver | Trusted mission version binding; never selected by tool arguments. |
 | `action` | Tool event | Parsed against the Core's exact action allow-list. |
 | `resource_id` | Tool event | Target identifier validated by the Core. |
 | `resource_type` | Tool event | Parsed and checked against the action and mission. |
@@ -79,13 +79,16 @@ is not accepted as an alternate input format.
 
 ## Trusted identity boundary
 
-`TrustedIdentityResolver.resolve(event, context)` is an injected protocol. The
-resolver must return an agent identifier only after verifying it against a
-trusted identity source. The handler ignores any `agent_id` argument, does not
-infer identity from the tool name, and rejects a missing, invalid, or failing
-resolver before it calls the Core or Gateway.
+`TrustedIdentityResolver.resolve(context)` is an injected protocol returning a
+`TrustedRequestContext` with `agent_id`, `mission_id`, and `mission_version`.
+The resolver must validate both the authenticated principal and its assigned
+mission using independently trusted state. The handler does not pass the raw
+event to this resolver, ignores caller-provided identity and mission fields,
+and rejects a missing, invalid, or failing resolver before it calls the Core or
+Gateway.
 
-The standard Lambda routing metadata does not establish agent identity. Gateway
+The standard Lambda routing metadata does not establish agent identity or
+mission assignment. Gateway
 header propagation is optional and must be configured in the target's metadata
 configuration. Propagation alone does not prove that a header is authentic or
 that an agent could not supply it. A deployment must establish a trusted
@@ -96,8 +99,9 @@ in this repository.
 ## Decision and response behavior
 
 1. Resolve trusted identity. Failure returns a controlled `BLOCK` response.
-2. Copy the flat tool arguments, discard agent-supplied identity, request ID,
-   and timestamp, then add the trusted identity and server-generated fields.
+2. Copy the flat tool arguments, discard agent-supplied identity, mission
+   binding, request ID, and timestamp, then add trusted and server-generated
+   fields.
 3. Parse a typed `ActionRequest` using the Core's validator.
 4. For a valid request, call `ExecutionGateway.submit()` exactly once. The
    Gateway delegates decision-making to the existing DecisionService.
